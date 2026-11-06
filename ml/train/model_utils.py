@@ -164,5 +164,9 @@ def create_smoke_base(
     destination.mkdir(parents=True, exist_ok=False)
     model.save_pretrained(destination, safe_serialization=True)
     tokenizer.save_pretrained(destination)
+    (destination / "smoke_model.json").write_text(
+        '{"smoke_test":true,"warning":"Random test-only model; not a translation checkpoint."}\n',
+        encoding="utf-8",
+    )
     model.config._name_or_path = str(destination)
     return tokenizer, model

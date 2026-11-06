@@ -186,6 +186,12 @@ class NllbTranslator(BaseTranslator):
         load_source, cached_revision = resolve_model_source(
             source, revision=revision, local_files_only=local_files_only
         )
+        if (Path(load_source) / "smoke_model.json").is_file():
+            if not allow_smoke_model:
+                raise ValueError("Random smoke models require --allow-smoke-model")
+            warning = "Random smoke model: output is not a usable translation."
+            if warning not in self.warnings:
+                self.warnings.append(warning)
         model_kwargs: dict[str, Any] = {}
         if revision and load_source == source and digest is None:
             # Ensure PEFT's optional adapter-config check uses the same Hub revision.
@@ -284,7 +290,8 @@ class NllbTranslator(BaseTranslator):
             film_id="inference",
             source=speaker + _protect(request.text),
             target=".",
-            context=tuple(_protect(text) for text in request.context[-self.context_window :])
+            context=tuple(_protect(text) for text in request.additional_context)
+            + tuple(_protect(text) for text in request.context[-self.context_window :])
             + tuple(hints),
             provenance="unknown",
             sample_weight=1.0,
@@ -371,8 +378,21 @@ class NllbTranslator(BaseTranslator):
                     {
                         "source_truncated": row["source_truncated"],
                         "context_truncated": row["context_truncated"],
-                        "context_sentences_used": max(
-                            0, row["context_sentences_used"] - len(requests[index].glossary_hints)
+                        "context_sentences_used": min(
+                            len(requests[index].context[-self.context_window :]),
+                            max(
+                                0,
+                                row["context_sentences_used"] - len(requests[index].glossary_hints),
+                            ),
+                        ),
+                        "additional_context_used": min(
+                            len(requests[index].additional_context),
+                            max(
+                                0,
+                                row["context_sentences_used"]
+                                - len(requests[index].glossary_hints)
+                                - len(requests[index].context[-self.context_window :]),
+                            ),
                         ),
                         "glossary_hints_used": min(
                             len(requests[index].glossary_hints), row["context_sentences_used"]

@@ -16,6 +16,9 @@ class TranslationRequest:
     speaker: str | None = None
     glossary_hints: tuple[tuple[str, str], ...] = ()
     force_terms: tuple[str, ...] = ()
+    # Optional extra context is older than, and never replaces, the automatic
+    # previous-sentence window. It may still be clipped by the token budget.
+    additional_context: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

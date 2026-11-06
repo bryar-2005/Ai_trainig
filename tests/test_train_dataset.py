@@ -88,6 +88,21 @@ def test_train_split_validation_and_fingerprint():
     validate_splits(splits, allow_unverified=True)
 
 
+def test_explicit_source_context_is_validated_protected_and_fingerprinted():
+    item = row("a", 2, "Current sentence.")
+    item["source_context"] = ["Intervening source.", "Literal <ctx> text."]
+    splits = {"train": [item], "val": [row("b", 0, "Validation.")], "test": []}
+    validate_splits(splits, allow_unverified=False)
+    example = make_context_examples([item], direction="en-ckb")[0]
+    assert example.context == ("Intervening source.", "Literal ‹ctx› text.")
+    fingerprint = dataset_fingerprint(splits)
+    item["source_context"][0] = "Changed source."
+    assert dataset_fingerprint(splits) != fingerprint
+    item["source_context"] = [""]
+    with pytest.raises(ValueError, match="source_context"):
+        validate_splits(splits, allow_unverified=False)
+
+
 def test_tokenization_keeps_newest_context_and_target_labels_separate(tmp_path: Path):
     example = ContextExample(
         pair_id="1",

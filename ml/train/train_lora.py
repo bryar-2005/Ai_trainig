@@ -15,6 +15,7 @@ import os
 import sys
 import tempfile
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ from transformers import (
     EarlyStoppingCallback,
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
+    TrainerCallback,
     set_seed,
 )
 from transformers.trainer import TRAINING_ARGS_NAME
@@ -373,6 +375,23 @@ def _training_args(
     )
 
 
+class TrainingProgress(TrainerCallback):
+    """Report optimizer steps; raising in the callback aborts the run safely."""
+
+    def __init__(self, callback: Callable[[dict[str, Any]], None]):
+        self.callback = callback
+
+    def on_step_end(self, args, state, control, **kwargs):
+        self.callback(
+            {"stage": "training", "step": state.global_step, "total_steps": state.max_steps}
+        )
+
+    def on_prediction_step(self, args, state, control, **kwargs):
+        self.callback(
+            {"stage": "validation", "step": state.global_step, "total_steps": state.max_steps}
+        )
+
+
 def run_training(
     config: RunConfig,
     *,
@@ -380,9 +399,75 @@ def run_training(
     limit: int = 200,
     resume: str | None = None,
     allow_unverified_data: bool = False,
+    initial_adapter: str | Path | None = None,
+    progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Train one direction, checkpoint full state, and save the best adapter."""
     config = validate_config(_smoke_config(config) if smoke_test else config)
+    adapter_path: Path | None = None
+    adapter_manifest: dict[str, Any] = {}
+    adapter_digest: str | None = None
+    if initial_adapter is not None:
+        if smoke_test:
+            raise ValueError(
+                "An initial adapter cannot be combined with a newly randomized smoke base"
+            )
+        requested = Path(initial_adapter).expanduser()
+        if requested.is_symlink():
+            raise ValueError("Initial adapter may not be a symlink")
+        adapter_path = requested.resolve()
+        required = ("adapter_config.json", "adapter_model.safetensors", "training_manifest.json")
+        if not adapter_path.is_dir() or any(
+            not (adapter_path / name).is_file() for name in required
+        ):
+            raise ValueError("Initial adapter is missing a completed Phase 2 model or manifest")
+        try:
+            adapter_manifest = json.loads(
+                (adapter_path / "training_manifest.json").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError("Cannot read initial adapter manifest") from exc
+        if not isinstance(adapter_manifest, dict):
+            raise ValueError("Initial adapter manifest must be an object")
+        previous_config = adapter_manifest.get("config")
+        if adapter_manifest.get("status") != "completed" or not isinstance(previous_config, dict):
+            raise ValueError("Initial adapter manifest is incomplete")
+        if previous_config.get("direction") != config.direction:
+            raise ValueError(
+                "Initial adapter direction differs from the requested training direction"
+            )
+        expected_lora = previous_config.get("lora")
+        actual_lora = config.as_dict()["lora"]
+        if json.dumps(expected_lora, sort_keys=True) != json.dumps(actual_lora, sort_keys=True):
+            raise ValueError("LoRA settings must match the initial adapter")
+        expected_base = adapter_manifest.get("base_model_sha256")
+        if expected_base is not None:
+            if local_model_digest(config.base_model) != expected_base:
+                raise ValueError("Initial adapter's local base hash does not match")
+        elif (
+            config.base_model != adapter_manifest.get("actual_base_model")
+            or not adapter_manifest.get("base_revision_resolved")
+            or (
+                config.base_revision
+                and config.base_revision != adapter_manifest["base_revision_resolved"]
+            )
+        ):
+            raise ValueError("Initial adapter's Hub base revision cannot be verified")
+        digest = hashlib.sha256()
+        for path in sorted(adapter_path.iterdir()):
+            if path.is_file() and path.suffix in {".json", ".safetensors", ".model", ".spm"}:
+                digest.update(path.name.encode() + b"\\0")
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+        adapter_digest = digest.hexdigest()
+        output_path = Path(config.output_dir).expanduser().resolve()
+        if (
+            output_path == adapter_path
+            or output_path.is_relative_to(adapter_path)
+            or adapter_path.is_relative_to(output_path)
+        ):
+            raise ValueError("Training output and initial adapter must not contain one another")
     if not 200 <= limit <= 500:
         raise ValueError("--limit must be between 200 and 500")
     # A run owns one output directory and normalizes examples across one
@@ -416,6 +501,9 @@ def run_training(
         "smoke_limit": limit if smoke_test else None,
         "allow_unverified_data": allow_unverified_data,
     }
+    # Preserve the pre-existing resume identity for runs without an initial adapter.
+    if adapter_path is not None:
+        identity["initial_adapter_sha256"] = adapter_digest
     identity_hash = hashlib.sha256(
         json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -436,6 +524,14 @@ def run_training(
         "status": "initializing",
         "warnings": [],
     }
+    if adapter_path is not None:
+        manifest["initial_adapter"] = str(adapter_path)
+        manifest["initial_training_identity_sha256"] = adapter_manifest.get("identity_sha256")
+        if adapter_manifest.get("smoke_test"):
+            manifest["smoke_test"] = True
+            manifest["warnings"].append(
+                "The initial adapter uses a random smoke base and cannot translate meaningfully."
+            )
     if smoke_test:
         manifest["warnings"].append(
             "Smoke model is random and cannot translate; no NLLB weights were trained."
@@ -469,20 +565,35 @@ def run_training(
             base_digest = local_model_digest(actual_base)
             if checkpoint and previous.get("base_model_sha256") != base_digest:
                 raise ValueError("The local base model differs from the checkpoint's original base")
-            requested_revision = previous.get("base_revision_resolved") or config.base_revision
+            requested_revision = (
+                previous.get("base_revision_resolved")
+                or adapter_manifest.get("base_revision_resolved")
+                or config.base_revision
+            )
             if checkpoint and base_digest is None and not requested_revision:
                 raise ValueError(
                     "The checkpoint does not record a reproducible base model revision"
                 )
+            from ml.inference.model_source import resolve_model_source
+
+            local_only = smoke_test or config.local_files_only
+            load_source, cached_revision = resolve_model_source(
+                actual_base, revision=requested_revision, local_files_only=local_only
+            )
+            model_kwargs: dict[str, Any] = {}
+            if requested_revision and load_source == actual_base and base_digest is None:
+                model_kwargs["adapter_kwargs"] = {"revision": requested_revision}
             base_model = AutoModelForSeq2SeqLM.from_pretrained(
-                actual_base,
+                load_source,
                 revision=requested_revision,
-                local_files_only=smoke_test or config.local_files_only,
+                local_files_only=local_only,
+                trust_remote_code=False,
+                **model_kwargs,
             )
             resolved_revision = (
                 None
                 if base_digest is not None
-                else getattr(base_model.config, "_commit_hash", None)
+                else (getattr(base_model.config, "_commit_hash", None) or cached_revision)
             )
             if base_digest is None and not resolved_revision:
                 # A full Hub commit hash supplied by the user is already immutable.
@@ -499,16 +610,37 @@ def run_training(
                     )
             if checkpoint and previous.get("base_revision_resolved") != resolved_revision:
                 raise ValueError("The resolved base model revision differs from the checkpoint")
+            if (
+                adapter_manifest.get("base_revision_resolved")
+                and adapter_manifest["base_revision_resolved"] != resolved_revision
+            ):
+                raise ValueError(
+                    "The resolved base model revision differs from the initial adapter"
+                )
             tokenizer = AutoTokenizer.from_pretrained(
-                actual_base,
-                revision=resolved_revision or requested_revision,
-                local_files_only=smoke_test or config.local_files_only,
+                str(adapter_path) if adapter_path else load_source,
+                revision=None if adapter_path else (resolved_revision or requested_revision),
+                local_files_only=local_only,
+                trust_remote_code=False,
             )
         context_token_id = add_context_token(tokenizer)
         resize_embeddings_for_tokenizer(base_model, tokenizer)
         source_id, target_id, _, _, _ = token_ids(tokenizer, config.direction)
+        if adapter_path and (
+            context_token_id != adapter_manifest.get("context_token_id")
+            or target_id != adapter_manifest.get("target_language_id")
+        ):
+            raise ValueError("Initial adapter tokenizer IDs differ from its manifest")
         base_model.generation_config.forced_bos_token_id = target_id
-        model = attach_lora(base_model, config.lora, context_token_id)
+        if adapter_path:
+            base_model.config.use_cache = False
+            model = PeftModel.from_pretrained(
+                base_model, str(adapter_path), is_trainable=True, local_files_only=True
+            )
+            if not any(p.requires_grad for p in model.parameters()):
+                raise ValueError("Initial adapter did not expose trainable parameters")
+        else:
+            model = attach_lora(base_model, config.lora, context_token_id)
         train_data, train_stats = _tokenize_rows(training_examples, tokenizer, config)
         val_data, val_stats = _tokenize_rows(validation_examples, tokenizer, config)
         args, precision = _training_args(config, train_samples=len(train_data), smoke=smoke_test)
@@ -557,7 +689,8 @@ def run_training(
             callbacks=[
                 EarlyStoppingCallback(
                     early_stopping_patience=config.training.early_stopping_patience
-                )
+                ),
+                *([TrainingProgress(progress)] if progress is not None else []),
             ],
         )
         result = trainer.train(resume_from_checkpoint=str(checkpoint) if checkpoint else None)
@@ -602,6 +735,9 @@ def _parser() -> argparse.ArgumentParser:
         "--resume-from-checkpoint", help="Checkpoint inside output directory, or 'latest'"
     )
     parser.add_argument("--allow-unverified-data", action="store_true")
+    parser.add_argument(
+        "--initial-adapter", type=Path, help="Continue a completed compatible LoRA adapter"
+    )
     return parser
 
 
@@ -623,6 +759,7 @@ def main(argv: list[str] | None = None) -> int:
             limit=args.limit,
             resume=args.resume_from_checkpoint,
             allow_unverified_data=args.allow_unverified_data,
+            initial_adapter=args.initial_adapter,
         )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"Training failed: {exc}", file=sys.stderr)

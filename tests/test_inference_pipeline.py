@@ -104,6 +104,29 @@ def test_reverse_direction_and_cancellation_are_supported(tmp_path):
         translate_subtitles(path, translator, progress=cancel)
 
 
+def test_opt_in_softening_uses_only_user_rules_and_flags_changes(tmp_path):
+    source = tmp_path / "source.srt"
+    source.write_text("1\n00:00:01,000 --> 00:00:04,000\nسەیارە لێرەیە.\n", encoding="utf-8")
+    rules = (("car", "vehicle"),)
+    unchanged = translate_subtitles(
+        source, RecordingTranslator("ckb-en"), options=PipelineOptions(profanity_replacements=rules)
+    )
+    assert unchanged["cues"][0]["machine_text"] == "The car is here."
+    softened = translate_subtitles(
+        source,
+        RecordingTranslator("ckb-en"),
+        glossary=[GlossaryEntry("car", "سەیارە")],
+        options=PipelineOptions(soften_profanity=True, profanity_replacements=rules),
+    )
+    assert softened["cues"][0]["machine_text"] == "The vehicle is here."
+    assert "profanity_softened_needs_review" in softened["cues"][0]["qa_warnings"]
+    assert "glossary_mismatch" in softened["cues"][0]["qa_warnings"]
+    with pytest.raises(ValueError, match="requires"):
+        translate_subtitles(
+            source, RecordingTranslator("ckb-en"), options=PipelineOptions(soften_profanity=True)
+        )
+
+
 def test_failed_constraint_uses_only_safe_literal_replacement(subtitle):
     class NoConstraints(RecordingTranslator):
         def translate_batch(self, requests):

@@ -45,6 +45,8 @@ class PipelineOptions:
     context_sentences: int = 3
     batch_size: int = 4
     register: str = "auto"
+    soften_profanity: bool = False
+    profanity_replacements: tuple[tuple[str, str], ...] = ()
 
     def validate(self) -> None:
         speeds = (self.target_cps, self.hard_cps)
@@ -73,6 +75,31 @@ class PipelineOptions:
             "informal",
         }:
             raise ValueError("register must be auto, formal or informal")
+        if not isinstance(self.soften_profanity, bool):
+            raise ValueError("soften_profanity must be a boolean")
+        if (
+            not isinstance(self.profanity_replacements, tuple)
+            or len(self.profanity_replacements) > 50
+            or any(
+                not isinstance(rule, tuple)
+                or len(rule) != 2
+                or any(
+                    not isinstance(text, str)
+                    or not text.strip()
+                    or len(text) > 120
+                    or "\n" in text
+                    or "\r" in text
+                    for text in rule
+                )
+                for rule in self.profanity_replacements
+            )
+        ):
+            raise ValueError("Softening replacements must be bounded nonempty text pairs")
+        if self.soften_profanity and not self.profanity_replacements:
+            raise ValueError("Softening requires explicit target-language replacement rules")
+        keys = [source.casefold() for source, _ in self.profanity_replacements]
+        if len(keys) != len(set(keys)):
+            raise ValueError("Softening source terms must be unique")
 
 
 ProgressCallback = Callable[[dict[str, Any]], None]
@@ -332,7 +359,23 @@ def translate_subtitles(
         )
         by_cue[cue.index] = compressed.text
         compression_rules[cue.index] = compressed.applied_rules
-    notify(8, detail="Applied conservative compression where useful")
+    softened: set[int] = set()
+    if options.soften_profanity:
+        for cue in cues:
+            text = by_cue[cue.index]
+            for source, replacement in options.profanity_replacements:
+                source = normalize_target(source, direction)
+                replacement = normalize_target(replacement, direction)
+                boundary = r"[\p{L}\p{M}\p{N}_]"
+                pattern = rf"(?<!{boundary}){regex.escape(source)}(?!{boundary})"
+                updated = regex.sub(
+                    pattern, lambda _, value=replacement: value, text, flags=regex.IGNORECASE
+                )
+                if updated != text:
+                    softened.add(cue.index)
+                    text = updated
+            by_cue[cue.index] = text
+    notify(8, detail="Applied conservative compression and any user-specified softening rules")
     for cue in cues:
         by_cue[cue.index] = wrap_lines(
             by_cue[cue.index], max_chars=options.max_chars, max_lines=options.max_lines
@@ -373,6 +416,8 @@ def translate_subtitles(
             extra.append("source_ad_removed")
         if compression_rules[cue.index]:
             extra.append("compression_needs_review")
+        if cue.index in softened:
+            extra.append("profanity_softened_needs_review")
         if cue.index in register_flags:
             extra.append("register_needs_review")
         if result.metadata.get("source_truncated"):

@@ -42,6 +42,7 @@ coverage/
 data/raw/
 data/processed/
 data/cache/
+data/private-storage/
 outputs/
 artifacts/
 checkpoints/

@@ -258,7 +258,7 @@ Important limitations and review rules:
 - Sentence boundaries and named entities are heuristic. Adjacent incomplete cues are merged, except across empty cues or explicit speaker changes. Offsets refer to normalized, space-joined source text; the individual cue timings never move. The previous 3 sentences are supplied by default (`--context-sentences` allows 3–5). Model limits can truncate source/context; this is flagged. Locked-term hints use the same context format, and a failed hard-constraint retry is followed only by replacement of an actual literal source term—not arbitrary insertion.
 - Target text is re-split only at whitespace, using source-span proportions and preferred syntactic boundaries. When there are too few target words or no legal line break, the engine preserves words, leaves some cues empty or lines long, and flags them instead of splitting a word or shifting time.
 - Reading speed defaults to 17 CPS with a 21 CPS hard-cap warning. A small conservative set of filler, repeated-pronoun, and concise-phrase rules attempts compression while protecting present locked terms. It cannot guarantee unchanged meaning or force an impossible cap; edits and unresolved violations are flagged for a human. Line wrapping similarly never truncates. `--target-cps`, `--hard-cps`, `--max-chars`, and `--max-lines` are configurable.
-- Sorani normalization maps Arabic variants to Kurdish codepoints and uses `؟ ، ؛`; embedded Latin and numbers are wrapped in Unicode LRI/PDI isolates. Ambiguous Arabic `ه` is preserved and flagged, not guessed. Profanity is not softened. SFX annotations are retained in the source language, appended to the cue when necessary, and flagged for review.
+- Sorani normalization maps Arabic variants to Kurdish codepoints and uses `؟ ، ؛`; embedded Latin and numbers are wrapped in Unicode LRI/PDI isolates. Ambiguous Arabic `ه` is preserved and flagged, not guessed. Profanity is not softened by default; the API's optional user-specified replacements are documented in the backend guide. SFX annotations are retained in the source language, appended to the cue when necessary, and flagged for review.
 - `--register auto|formal|informal` **flags** potentially inconsistent explicit Sorani pronouns for a speaker; it does not rewrite grammar or establish the speakers' relationship. QA also flags missing translations, glossary mismatches, source truncation, untranslated script, original timing overlaps/out-of-order cues, and low confidence. Confidence is an uncalibrated heuristic, not the probability that a translation is correct. Token log-probabilities are measured from the model's selected raw sequence by a memory-bounded teacher-forced pass; later glossary substitutions and compression do not change those scores.
 
 The model-independent `BaseTranslator` interface and progress callback can be used by later workers. For example:
@@ -278,6 +278,10 @@ result = translate_subtitles(
 ```
 
 A callback may raise an exception to stop the operation; the programmatic function itself writes no output file.
+
+## Backend API and workers
+
+The FastAPI/PostgreSQL backend and Celery/Redis workers support private projects, review, exports, resumable job progress and continued training. See **[backend setup and operational guidance](docs/backend.md)** for installation, migrations, secure administrator bootstrap, worker/beat commands, API security, private storage, model registration, feedback safeguards and integration tests. No pretrained weights or real evaluation results are included. The Next.js frontend and deployment packaging are not yet implemented.
 
 ## Tests and limitations
 

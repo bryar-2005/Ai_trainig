@@ -88,13 +88,18 @@ def make_context_examples(
         if pending and pending_speakers and speakers and pending_speakers != speakers:
             completed.append(_labelled(pending, pending_speakers))
             pending, pending_speakers = "", ()
+        context = (
+            tuple(_protect_marker(" ".join(value.split())) for value in row["source_context"])
+            if "source_context" in row
+            else tuple(completed)
+        )
         result.append(
             ContextExample(
                 pair_id=row["pair_id"],
                 film_id=row_film,
                 source=_labelled(source, speakers),
                 target=_protect_marker(target),
-                context=tuple(completed[-context_sentences:]),
+                context=context[-context_sentences:],
                 provenance=provenance,
                 sample_weight=PROVENANCE_WEIGHTS[provenance],
             )
@@ -129,11 +134,11 @@ def dataset_fingerprint(splits: dict[str, list[dict[str, Any]]]) -> str:
         for row in sorted(
             splits.get(split, []), key=lambda item: (item["film_id"], item["pair_id"])
         ):
-            digest.update(
-                json.dumps(
-                    [row.get(key) for key in keys], ensure_ascii=False, separators=(",", ":")
-                ).encode()
-            )
+            values = [row.get(key) for key in keys]
+            # Preserve existing fingerprints for legacy datasets without explicit context.
+            if "source_context" in row:
+                values.append(row["source_context"])
+            digest.update(json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode())
             digest.update(b"\n")
     return digest.hexdigest()
 
@@ -176,6 +181,14 @@ def validate_splits(splits: dict[str, list[dict[str, Any]]], *, allow_unverified
                     isinstance(item, str) for item in speakers
                 ):
                     raise ValueError(f"{name} row has invalid {key}")
+            if "source_context" in row:
+                context = row["source_context"]
+                if (
+                    not isinstance(context, list)
+                    or len(context) > 5
+                    or not all(isinstance(item, str) and item.strip() for item in context)
+                ):
+                    raise ValueError(f"{name} row has invalid source_context")
             if not isinstance(row["language_verified"], bool):
                 raise ValueError(f"{name} row has invalid language_verified")
             if row["pair_id"] in ids:

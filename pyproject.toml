@@ -23,6 +23,23 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "ruff>=0.9,<1"]
+api = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.30,<1",
+    "sqlalchemy[asyncio]>=2.0,<2.1",
+    "asyncpg>=0.30,<1",
+    "alembic>=1.14,<2",
+    "celery[redis]>=5.4,<6",
+    "pydantic-settings>=2.7,<3",
+    "python-dotenv>=1,<2",
+    "PyJWT>=2.10,<3",
+    "argon2-cffi>=23,<26",
+    "python-multipart>=0.0.20,<1",
+    "email-validator>=2,<3",
+    "prometheus-client>=0.21,<1",
+    "boto3>=1.35,<2",
+]
+api-test = ["httpx>=0.28,<1", "pytest-asyncio>=0.25,<2", "aiosqlite>=0.20,<1"]
 train = [
     "torch>=2.6,<2.7",
     "transformers>=4.56.2,<4.57",
@@ -50,12 +67,14 @@ sorani-train = "ml.train.train_lora:main"
 sorani-merge-adapter = "ml.train.merge_adapter:main"
 sorani-evaluate = "ml.eval.evaluate:main"
 sorani-translate = "ml.inference.pipeline:main"
+sorani-create-admin = "api.db.seed:main"
 
 [tool.setuptools.packages.find]
-include = ["ml*"]
+include = ["ml*", "api*"]
 
 [tool.setuptools.package-data]
 "ml.train" = ["config.yaml"]
+"api.db.migrations" = ["script.py.mako"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -67,3 +86,8 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# FastAPI dependency and request-parameter declarations are framework markers.
+"api/routes/*.py" = ["B008"]
+"api/security.py" = ["B008"]

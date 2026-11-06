@@ -46,6 +46,13 @@ def test_real_local_tiny_adapter_token_scores_constraints_and_cli(
     )
     with pytest.raises(ValueError, match="smoke"):
         NllbTranslator(**kwargs)
+    with pytest.raises(ValueError, match="smoke"):
+        NllbTranslator(
+            direction="en-ckb",
+            model_version_id="random-base",
+            model=str(tmp_path / "training" / "smoke_base"),
+            local_files_only=True,
+        )
     with pytest.raises(ValueError, match="immutable"):
         NllbTranslator(**kwargs, model_revision="main", allow_smoke_model=True)
     with pytest.raises(ValueError, match="recorded"):
@@ -157,6 +164,7 @@ def test_real_local_tiny_adapter_token_scores_constraints_and_cli(
             model_version_id="cached-smoke",
             model="local/base",
             local_files_only=True,
+            allow_smoke_model=True,
             max_source_length=settings["max_source_length"],
             max_target_length=settings["max_target_length"],
         )

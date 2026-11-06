@@ -104,6 +104,67 @@ def test_resuming_restores_model_optimizer_scheduler_rng_and_callback_state(smok
     assert all(torch.equal(before[key], after[key]) for key in before)
 
 
+def test_continue_adapter_trains_existing_weights_and_reports_progress(smoke_run, tmp_path):
+    root, config, manifest = smoke_run
+    initial = root / "run" / "adapter"
+    continued = replace(
+        train_lora._smoke_config(config),
+        base_model=str(root / "run" / "smoke_base"),
+        output_dir=str(tmp_path / "continued"),
+        local_files_only=True,
+    )
+    events = []
+    result = run_training(continued, initial_adapter=initial, progress=events.append)
+    assert result["status"] == "completed" and result["smoke_test"] is True
+    assert result["initial_training_identity_sha256"] == manifest["identity_sha256"]
+    assert any(event["stage"] == "training" for event in events)
+    before = load_file(str(initial / "adapter_model.safetensors"))
+    after = load_file(str(tmp_path / "continued" / "adapter" / "adapter_model.safetensors"))
+    assert before.keys() == after.keys()
+    assert any(not torch.equal(before[key], after[key]) for key in before)
+    wrong = replace(continued, direction="ckb-en", output_dir=str(tmp_path / "wrong"))
+    with pytest.raises(ValueError, match="direction"):
+        run_training(wrong, initial_adapter=initial)
+
+
+def test_continued_cached_hub_adapter_never_attempts_network(smoke_run, tmp_path, monkeypatch):
+    import huggingface_hub.constants
+    import requests
+    import transformers.utils.hub
+
+    root, config, _ = smoke_run
+    commit = "c" * 40
+    cache = tmp_path / "cache"
+    snapshot = cache / "models--local--base" / "snapshots" / commit
+    snapshot.parent.mkdir(parents=True)
+    shutil.copytree(root / "run" / "smoke_base", snapshot)
+    adapter = tmp_path / "adapter"
+    shutil.copytree(root / "run" / "adapter", adapter)
+    manifest_path = adapter / "training_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest.update(
+        actual_base_model="local/base", base_model_sha256=None, base_revision_resolved=commit
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    continued = replace(
+        train_lora._smoke_config(config),
+        base_model="local/base",
+        base_revision=commit,
+        output_dir=str(tmp_path / "continued-hub"),
+        local_files_only=True,
+    )
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", str(cache))
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", False)
+    monkeypatch.setattr(transformers.utils.hub, "_is_offline_mode", False)
+
+    def deny_http(*args, **kwargs):
+        raise AssertionError("offline continued training attempted a network request")
+
+    monkeypatch.setattr(requests.sessions.Session, "request", deny_http)
+    result = run_training(continued, initial_adapter=adapter)
+    assert result["status"] == "completed" and result["base_revision_resolved"] == commit
+
+
 def test_resume_rejects_changed_config_and_output_reuse(smoke_run):
     root, config, _ = smoke_run
     with pytest.raises(ValueError, match="differs"):
