@@ -1,4 +1,4 @@
-name: Data, training, and evaluation
+name: Data, training, evaluation, and inference
 
 on:
   push:
@@ -42,5 +42,5 @@ jobs:
           python -m pip install 'torch==2.6.0' --index-url https://download.pytorch.org/whl/cpu
           python -m pip install -e '.[dev,train,eval]'
           python -m pip check
-      - name: Run offline training and evaluation tests
-        run: pytest -q tests/test_train_*.py tests/test_eval_*.py
+      - name: Run offline training, evaluation, and inference tests
+        run: pytest -q tests/test_train_*.py tests/test_eval_*.py tests/test_inference_*.py

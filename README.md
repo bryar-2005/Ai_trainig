@@ -1,6 +1,6 @@
 # English ↔ Sorani subtitle training
 
-This repository is being built in phases toward the product described in [SPEC.md](SPEC.md). **Phases 0–3 implement local data preparation, context-aware LoRA training, and model evaluation.** There is no supplied subtitle corpus, verified gold set, pretrained checkpoint, or trained translation model in this repository. The subtitle translation engine, API, web app, Docker deployment, and continuous feedback are not implemented yet.
+This repository is being built in phases toward the product described in [SPEC.md](SPEC.md). **Phases 0–4 implement local data preparation, context-aware LoRA training, model evaluation, and a subtitle inference/QA engine.** There is no supplied subtitle corpus, verified gold set, pretrained checkpoint, or trained translation model in this repository. The API, web app, subtitle export service, Docker deployment, and continuous feedback are not implemented yet.
 
 The Arena session uses the existing public `bryar-2005/Ai_trainig` repository and its fixed session branch; it does not reinitialize Git, create a separate `AI_training` remote, or push to `main`.
 
@@ -233,8 +233,54 @@ These outputs can contain private dialogue and predictions; keep them local and 
 - **Glossary adherence:** for each scored pair and locked term found in its source, check whether the target term appears in the hypothesis. Matching uses NFC normalization, case folding, and Unicode word boundaries; it does not perform morphological analysis. The rate is null when no locked term applies or no glossary was supplied.
 - **Length ratio:** hypothesis visible-grapheme count divided by reference count (minimum denominator 1), summarized with min, mean, median, 90th percentile, and max.
 
+## Translate and check a local subtitle file
+
+The Phase 4 engine consumes an authorized local `.srt`, `.vtt`, `.ass`, or `.ssa` file and produces an auditable **JSON result**, not a finished subtitle export or a web app. Install `.[train]` and make a compatible NLLB base and, preferably, a Phase 2 adapter available. Weights are not provided. Use only trusted model, tokenizer, and NER assets; some checkpoint formats can execute code when loaded. For example:
+
+```bash
+sorani-translate \
+  --input data/raw/film-one/en.srt \
+  --output outputs/film-one-ckb.json \
+  --direction en-ckb --model-version-id nllb-en-ckb-v1 \
+  --adapter-dir outputs/nllb-en-ckb/adapter \
+  --glossary data/cache/eval-glossary.json \
+  --local-files-only --device cpu
+```
+
+Use a matching `ckb-en` adapter and source file for the reverse direction. `--model /path/to/base` can point to an identical copy of an adapter's original local base; its assets must match the training hash. Instead of `--adapter-dir`, `--model` may name a local base or merged model directory, or a Hub model if online access is permitted. `--model-revision` accepts an immutable 40-character Hub commit for base-only inference; adapters use their recorded revision. The result records model identity where available. A base-only model that needs a new `<ctx>` embedding has an **untrained** marker and may perform poorly; a trained adapter or merged model is preferable. `--allow-smoke-model` exists only for random smoke-test adapters: they cannot translate meaningfully. Choose `--device cuda` only with an available compatible GPU.
+
+A glossary is optional; it uses the English/Sorani JSON array format shown above. Only user-locked entries are enforced. The default entity extractor proposes approximate spellings for capitalized English names and speaker labels, but cannot reliably classify people, places, or organizations. Proposals are **unlocked** and need human correction. `--ner-model /path/to/token-classification-model` uses a real Transformers NER model with PER/LOC/ORG labels, when one is supplied; review its license and accuracy. In CKB→EN, source-side English NER can only see English/Latin material present in the source or speaker labels—it is not Sorani NER. No NER assets are downloaded by this repository when `--local-files-only` is set.
+
+The engine reports progress through 12 numbered stages, then produces original cue IDs and millisecond timestamps, normalized source offsets into reconstructed sentences, speaker/SFX/style metadata, generated `machine_text`, empty `human_text`/revision history, a model version ID, sentence-level selected-token log-probabilities, and cue/project QA. The CLI prints progress JSON lines to stderr and a summary to stdout; the JSON output may contain private dialogue and must stay out of Git. The output file must be new and outside input model directories. There is deliberately no `--overwrite` option.
+
+Important limitations and review rules:
+
+- Sentence boundaries and named entities are heuristic. Adjacent incomplete cues are merged, except across empty cues or explicit speaker changes. Offsets refer to normalized, space-joined source text; the individual cue timings never move. The previous 3 sentences are supplied by default (`--context-sentences` allows 3–5). Model limits can truncate source/context; this is flagged. Locked-term hints use the same context format, and a failed hard-constraint retry is followed only by replacement of an actual literal source term—not arbitrary insertion.
+- Target text is re-split only at whitespace, using source-span proportions and preferred syntactic boundaries. When there are too few target words or no legal line break, the engine preserves words, leaves some cues empty or lines long, and flags them instead of splitting a word or shifting time.
+- Reading speed defaults to 17 CPS with a 21 CPS hard-cap warning. A small conservative set of filler, repeated-pronoun, and concise-phrase rules attempts compression while protecting present locked terms. It cannot guarantee unchanged meaning or force an impossible cap; edits and unresolved violations are flagged for a human. Line wrapping similarly never truncates. `--target-cps`, `--hard-cps`, `--max-chars`, and `--max-lines` are configurable.
+- Sorani normalization maps Arabic variants to Kurdish codepoints and uses `؟ ، ؛`; embedded Latin and numbers are wrapped in Unicode LRI/PDI isolates. Ambiguous Arabic `ه` is preserved and flagged, not guessed. Profanity is not softened. SFX annotations are retained in the source language, appended to the cue when necessary, and flagged for review.
+- `--register auto|formal|informal` **flags** potentially inconsistent explicit Sorani pronouns for a speaker; it does not rewrite grammar or establish the speakers' relationship. QA also flags missing translations, glossary mismatches, source truncation, untranslated script, original timing overlaps/out-of-order cues, and low confidence. Confidence is an uncalibrated heuristic, not the probability that a translation is correct. Token log-probabilities are measured from the model's selected raw sequence by a memory-bounded teacher-forced pass; later glossary substitutions and compression do not change those scores.
+
+The model-independent `BaseTranslator` interface and progress callback can be used by later workers. For example:
+
+```python
+from ml.inference.nllb_translator import NllbTranslator
+from ml.inference.pipeline import PipelineOptions, translate_subtitles
+
+model = NllbTranslator(
+    direction="en-ckb", model_version_id="nllb-en-ckb-v1",
+    adapter_dir="outputs/nllb-en-ckb/adapter", local_files_only=True,
+)
+result = translate_subtitles(
+    "data/raw/film-one/en.srt", model, options=PipelineOptions(),
+    progress=lambda event: print(event["stage"], event["percent"]),
+)
+```
+
+A callback may raise an exception to stop the operation; the programmatic function itself writes no output file.
+
 ## Tests and limitations
 
-`pytest -q` exercises all supported formats, normalization, 1:1/1:n/n:1 alignment, synthetic fastText language ID, filtering, MinHash, film-level splits, safe output handling, and a real CLI → `DatasetDict` → review-sample round trip. With `.[train]` installed, it also checks context/speaker handling, loss weighting and gradient accumulation, a 200-example offline smoke run in both directions, exact CPU checkpoint resume, sentinel-row reload, and merged-model logits. The evaluation tests cover review and split validation, both CLI exit paths, HTML escaping and 100-row sampling, real SentencePiece tokenization, and adapter generation. With `.[eval]`, they also construct a tiny random local COMET checkpoint and call its actual loading and prediction APIs offline. Optional-dependency tests are skipped if their packages are absent. All fixtures are synthetic, not movie subtitles. GitHub Actions runs data checks and a separate offline CPU training/evaluation job.
+`pytest -q` exercises all supported formats, normalization, 1:1/1:n/n:1 alignment, synthetic fastText language ID, filtering, MinHash, film-level splits, safe output handling, and a real CLI → `DatasetDict` → review-sample round trip. With `.[train]` installed, it also checks context/speaker handling, loss weighting and gradient accumulation, a 200-example offline smoke run in both directions, exact CPU checkpoint resume, sentinel-row reload, and merged-model logits. The evaluation tests cover review and split validation, both CLI exit paths, HTML escaping and 100-row sampling, real SentencePiece tokenization, and adapter generation. With `.[eval]`, they also construct a tiny random local COMET checkpoint and call its actual loading and prediction APIs offline. Inference tests cover all stages, timing and lineage invariants, glossary retry, compression, RTL/QA, actual local tiny adapter/merged generation and token scores, and a tiny local Transformers NER model. Optional-dependency tests are skipped if their packages are absent. All fixtures are synthetic, not movie subtitles. GitHub Actions runs data checks and a separate offline CPU model job.
 
-No real NLLB fine-tuning, GPU benchmark, translation-quality evaluation, or reviewed gold benchmark has been completed in this environment. Automated language ID, quality proxies, temporal matches, sentence reconstruction, and spelling heuristics require human review before using or publishing results.
+No real NLLB fine-tuning, pretrained subtitle inference, GPU benchmark, translation-quality evaluation, or reviewed gold benchmark has been completed in this environment. Automated language ID, quality proxies, temporal matches, sentence reconstruction, compression, named entities, and spelling heuristics require human review before using or publishing results.

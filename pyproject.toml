@@ -17,6 +17,7 @@ dependencies = [
     # PyArrow 26 wheels require NumPy 2 at runtime despite loose package metadata.
     "pyarrow>=21,<22",
     "pysubs2>=1.8.1,<2",
+    "regex>=2024.0",
     "webvtt-py>=0.7,<1",
 ]
 
@@ -37,7 +38,6 @@ train = [
 ]
 eval = [
     "unbabel-comet>=2.2.7,<2.3",
-    "regex>=2024.0",
     "protobuf>=4.25,<5",
     "sentencepiece>=0.2,<0.2.1",
     "sacrebleu>=2.6,<3",
@@ -49,6 +49,7 @@ sorani-build-dataset = "ml.data.build_dataset:main"
 sorani-train = "ml.train.train_lora:main"
 sorani-merge-adapter = "ml.train.merge_adapter:main"
 sorani-evaluate = "ml.eval.evaluate:main"
+sorani-translate = "ml.inference.pipeline:main"
 
 [tool.setuptools.packages.find]
 include = ["ml*"]
