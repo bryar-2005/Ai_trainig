@@ -1,6 +1,6 @@
 # English ↔ Sorani subtitle training
 
-This repository is being built in phases toward the product described in [SPEC.md](SPEC.md). **Phases 0–2 implement local data preparation and a context-aware LoRA training pipeline.** There is no supplied subtitle corpus, verified gold set, pretrained checkpoint, or trained translation model in this repository. Translation/inference, standalone evaluation, the API, the web app, Docker deployment, and continuous feedback are not implemented yet.
+This repository is being built in phases toward the product described in [SPEC.md](SPEC.md). **Phases 0–3 implement local data preparation, context-aware LoRA training, and model evaluation.** There is no supplied subtitle corpus, verified gold set, pretrained checkpoint, or trained translation model in this repository. The subtitle translation engine, API, web app, Docker deployment, and continuous feedback are not implemented yet.
 
 The Arena session uses the existing public `bryar-2005/Ai_trainig` repository and its fixed session branch; it does not reinitialize Git, create a separate `AI_training` remote, or push to `main`.
 
@@ -167,8 +167,74 @@ sorani-merge-adapter --adapter-dir outputs/nllb-en-ckb/adapter \
 
 The merge command checks token IDs and local-base hashes, preserves the trained sentinel row, and records provenance in `merge_manifest.json`. An override of a Hub base with another path/repository cannot always be verified automatically; check `base_identity_verified` and ensure the weights are identical. Training outputs must be new/empty (unless resuming), must not contain the input dataset, and merge output must be new/empty and separate from the adapter. Default output and log locations are ignored by Git; custom paths are your responsibility.
 
+## Evaluate a baseline against a trained adapter
+
+Install the evaluation and training extras in the Python 3.11 environment:
+
+```bash
+python -m pip install -e '.[dev,train,eval]'
+```
+
+**Review the gold first.** Phase 1's `ml/eval/gold_test.jsonl` is a sample to review, not an already verified benchmark. A qualified bilingual reviewer should inspect each pair and its film context, correct the reference translation where needed, and set that record's `review_status` to `"verified"`. Keep the `pair_id`, `film_id`, and source-language text exactly as in the held-out dataset. For EN→CKB the source is `english` and the reference is `sorani`; for CKB→EN they are reversed. If corrections are needed on both sides, maintain direction-specific review files. The evaluator rejects missing/unverified reviews by default, unknown or duplicate IDs, changed sources, film leakage, and missing source durations. `--allow-unverified-gold` is an explicit **exploration-only** override; it is not human verification. Verify the language of any unverified context rows, too.
+
+For a complete evaluation you must supply two assets that are **not included or obtained for you by this repository**:
+
+1. A local SentencePiece `.model` for spBLEU. Obtain and verify the official FLORES-200 tokenizer yourself if you need FLORES-200-comparable results. An arbitrary SentencePiece model still gives SentencePiece-tokenized BLEU, but must not be presented as official FLORES-200 spBLEU. The report records the tokenizer's SHA-256 and SacreBLEU signature.
+2. A trusted **reference-based** [COMET](https://github.com/Unbabel/COMET) checkpoint, including its companion `hparams.yaml` two directory levels above the `.ckpt`, and the checkpoint's pretrained encoder/tokenizer assets. A typical layout is `data/cache/comet/hparams.yaml` and `data/cache/comet/checkpoints/model.ckpt`. Obtain assets with appropriate permission and inspect their license. COMET checkpoints are PyTorch artifacts that can execute code when loaded: **do not load untrusted checkpoints**. COMET or Transformers may fetch encoder/tokenizer assets when online access is allowed. For offline evaluation, ensure the base model and COMET encoder/tokenizer are already available locally and pass `--local-files-only`.
+
+COMET support and calibration for Sorani must be established independently. For example, the common `Unbabel/wmt22-comet-da` model card lists Kurdish Kurmanji but does not establish Sorani coverage. Treat any COMET score as an auxiliary, potentially unreliable signal, not proof of translation quality.
+
+Supply a JSON glossary if you want adherence measured. For example, `data/cache/eval-glossary.json` can contain:
+
+```json
+[
+  {"english": "Bridge", "sorani": "پرد", "locked": true},
+  {"english": "Station", "sorani": "وێستگە", "locked": false}
+]
+```
+
+Run the reviewed test set against the same dataset and base model used for the adapter:
+
+```bash
+sorani-evaluate \
+  --dataset-dir data/processed/subtitles/dataset \
+  --gold ml/eval/gold_test.jsonl \
+  --direction en-ckb \
+  --adapter-dir outputs/nllb-en-ckb/adapter \
+  --spm-model data/cache/flores200-spm.model \
+  --comet-checkpoint data/cache/comet/checkpoints/model.ckpt \
+  --glossary data/cache/eval-glossary.json \
+  --local-files-only --device cpu \
+  --output-dir outputs/eval-en-ckb
+```
+
+Choose `--device cuda` if an appropriate CUDA GPU is available. The adapter manifest's direction, dataset fingerprint, base identity, language IDs, and `<ctx>` ID are checked. When the original local base was moved, `--base-model /path/to/copy` accepts a copy only if its recognized assets match the recorded hash. The baseline is the unadapted base with the **same** context formatting and generation settings as the adapter. The base does not receive the adapter's trained `<ctx>` embedding: the row may be newly random or previously unused padding, and is not necessarily pretrained as a context delimiter. The baseline is therefore not neutral with respect to the delimiter; interpret comparisons accordingly. Both use up to the adapter's configured 3–5 previous completed source sentences. The HTML displays up to five *available* sentences, which may include more than the model's configured window.
+
+Alternatively, provide two prediction files, with exactly one JSON object per gold pair, in any order:
+
+```json
+{"pair_id":"held-out-pair-id","text":"the system's translation"}
+```
+
+Use `--baseline-predictions path/baseline.jsonl --candidate-predictions path/candidate.jsonl` instead of `--adapter-dir`. The generated combined `predictions.jsonl` can also be passed as both inputs on a later run; the appropriate `baseline` or `candidate` field is used. Precomputed mode cannot verify the models' origin or their use of context. For incomplete development-only runs, explicitly pass `--skip-spbleu` and/or `--skip-comet`; skipped metrics are null and warnings appear in the report. Random Phase 2 smoke adapters additionally require `--allow-smoke-model`, and their results do not measure translation quality.
+
+Each evaluation requires a new or empty output directory separate from all inputs. It writes:
+
+- `metrics.json`: both systems' scores, the chrF++ difference, configuration/asset hashes and warnings. The training-relevant dataset hash and an additional held-out timing hash are recorded separately.
+- `predictions.jsonl`: baseline and candidate hypotheses for **every** gold pair.
+- `comparison.html`: a self-contained, escaped side-by-side report. It shows up to 100 deterministic sampled pairs by default, with highlighted baseline→candidate differences; `--report-lines` can change the limit and `--label` can identify the run. Open the file in a browser.
+
+These outputs can contain private dialogue and predictions; keep them local and out of Git. COMET's checkpoint and `hparams.yaml` hashes are recorded, but separately resolved encoder/tokenizer files are not fully hashed; retain the exact assets and environment for reproducibility. The process exits **1 after writing the report** when candidate chrF++ is lower than baseline, 0 when it is not, and 2 on input/evaluation errors. Passing the chrF++ gate alone is not proof the model is suitable for deployment.
+
+### Metric definitions
+
+- **chrF++:** corpus SacreBLEU chrF with word order 2, on a 0–100 scale; this is the regression gate. **spBLEU:** SacreBLEU corpus BLEU on SentencePiece-tokenized text, 0–100. **COMET:** the reference-based checkpoint's corpus system score; its scale and coverage depend on that model.
+- **CPS:** visible Unicode grapheme clusters, including spaces but excluding line breaks and invisible controls, divided by the original *source aligned-group* duration. Report percentages above 17 and 21 CPS. This is a proxy: a 1:n alignment can span multiple subtitle cues, so it is not final per-cue QA.
+- **Glossary adherence:** for each scored pair and locked term found in its source, check whether the target term appears in the hypothesis. Matching uses NFC normalization, case folding, and Unicode word boundaries; it does not perform morphological analysis. The rate is null when no locked term applies or no glossary was supplied.
+- **Length ratio:** hypothesis visible-grapheme count divided by reference count (minimum denominator 1), summarized with min, mean, median, 90th percentile, and max.
+
 ## Tests and limitations
 
-`pytest -q` exercises all supported formats, normalization, 1:1/1:n/n:1 alignment, synthetic fastText language ID, filtering, MinHash, film-level splits, safe output handling, and a real CLI → `DatasetDict` → review-sample round trip. With `.[train]` installed, it also checks context/speaker handling, loss weighting and gradient accumulation, a 200-example offline smoke run in both directions, exact CPU checkpoint resume, sentinel-row reload, and merged-model logits. Without the training extra, those optional tests are skipped. Fixtures are original synthetic sentences, not movie subtitles. GitHub Actions runs data checks and a separate offline CPU training job.
+`pytest -q` exercises all supported formats, normalization, 1:1/1:n/n:1 alignment, synthetic fastText language ID, filtering, MinHash, film-level splits, safe output handling, and a real CLI → `DatasetDict` → review-sample round trip. With `.[train]` installed, it also checks context/speaker handling, loss weighting and gradient accumulation, a 200-example offline smoke run in both directions, exact CPU checkpoint resume, sentinel-row reload, and merged-model logits. The evaluation tests cover review and split validation, both CLI exit paths, HTML escaping and 100-row sampling, real SentencePiece tokenization, and adapter generation. With `.[eval]`, they also construct a tiny random local COMET checkpoint and call its actual loading and prediction APIs offline. Optional-dependency tests are skipped if their packages are absent. All fixtures are synthetic, not movie subtitles. GitHub Actions runs data checks and a separate offline CPU training/evaluation job.
 
 No real NLLB fine-tuning, GPU benchmark, translation-quality evaluation, or reviewed gold benchmark has been completed in this environment. Automated language ID, quality proxies, temporal matches, sentence reconstruction, and spelling heuristics require human review before using or publishing results.

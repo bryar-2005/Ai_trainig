@@ -28,10 +28,19 @@ train = [
     "peft>=0.18.1,<0.19",
     "accelerate>=1.10.1,<1.11",
     "sacrebleu>=2.6,<3",
-    "sentencepiece>=0.2,<1",
-    "protobuf>=5,<7",
+    # Newer SentencePiece protobuf bindings require protobuf 5+, conflicting with COMET 2.x.
+    "sentencepiece>=0.2,<0.2.1",
+    # COMET 2.x requires protobuf 4.x; TensorBoard and SentencePiece also support it.
+    "protobuf>=4.25,<5",
     "tensorboard>=2.18,<3",
     "PyYAML>=6,<7",
+]
+eval = [
+    "unbabel-comet>=2.2.7,<2.3",
+    "regex>=2024.0",
+    "protobuf>=4.25,<5",
+    "sentencepiece>=0.2,<0.2.1",
+    "sacrebleu>=2.6,<3",
 ]
 wandb = ["wandb>=0.19,<1"]
 
@@ -39,6 +48,7 @@ wandb = ["wandb>=0.19,<1"]
 sorani-build-dataset = "ml.data.build_dataset:main"
 sorani-train = "ml.train.train_lora:main"
 sorani-merge-adapter = "ml.train.merge_adapter:main"
+sorani-evaluate = "ml.eval.evaluate:main"
 
 [tool.setuptools.packages.find]
 include = ["ml*"]
