@@ -45,6 +45,9 @@ data/cache/
 outputs/
 artifacts/
 checkpoints/
+runs/
+wandb/
+events.out.tfevents.*
 ml/eval/gold_test.jsonl
 *.arrow
 *.parquet

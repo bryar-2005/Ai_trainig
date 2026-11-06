@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sorani-subtitle-training"
 version = "0.1.0"
-description = "Local, provenance-aware English and Sorani subtitle data preparation"
+description = "Provenance-aware English–Sorani subtitle data preparation and LoRA training"
 requires-python = ">=3.11,<3.12"
 dependencies = [
     "datasets>=4.8.5,<5",
@@ -22,12 +22,29 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "ruff>=0.9,<1"]
+train = [
+    "torch>=2.6,<2.7",
+    "transformers>=4.56.2,<4.57",
+    "peft>=0.18.1,<0.19",
+    "accelerate>=1.10.1,<1.11",
+    "sacrebleu>=2.6,<3",
+    "sentencepiece>=0.2,<1",
+    "protobuf>=5,<7",
+    "tensorboard>=2.18,<3",
+    "PyYAML>=6,<7",
+]
+wandb = ["wandb>=0.19,<1"]
 
 [project.scripts]
 sorani-build-dataset = "ml.data.build_dataset:main"
+sorani-train = "ml.train.train_lora:main"
+sorani-merge-adapter = "ml.train.merge_adapter:main"
 
 [tool.setuptools.packages.find]
 include = ["ml*"]
+
+[tool.setuptools.package-data]
+"ml.train" = ["config.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
