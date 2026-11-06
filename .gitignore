@@ -2,6 +2,10 @@
 .env
 .env.*
 !.env.example
+.envrc
+.aws/
+.azure/
+.gcp/
 *.pem
 *.key
 *.p12
@@ -46,20 +50,36 @@ ml/eval/gold_test.jsonl
 *.parquet
 *.safetensors
 *.bin
+*.ftz
 *.pt
 *.pth
 *.ckpt
+*.h5
+*.hdf5
+*.onnx
+*.gguf
 
-# Video and audio
-*.mp4
-*.mkv
-*.webm
-*.mov
-*.avi
-*.wav
-*.mp3
-*.flac
-*.m4a
+# Subtitle files and JSONL may contain copyrighted or private dialogue.
+# Explicitly force-add only independently authored, approved fixtures if needed.
+*.[sS][rR][tT]
+*.[vV][tT][tT]
+*.[aA][sS][sS]
+*.[sS][sS][aA]
+*.jsonl
+
+# Video and audio (case insensitive)
+*.[mM][pP]4
+*.[mM][kK][vV]
+*.[wW][eE][bB][mM]
+*.[mM][oO][vV]
+*.[aA][vV][iI]
+*.[mM]4[vV]
+*.[mM][pP][eE][gG]
+*.[wW][mM][vV]
+*.[wW][aA][vV]
+*.[mM][pP]3
+*.[fF][lL][aA][cC]
+*.[mM]4[aA]
 
 # Local tooling and OS
 .vscode/
