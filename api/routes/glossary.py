@@ -8,7 +8,7 @@ import json
 import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -153,6 +153,21 @@ async def delete_term(
     await db.delete(term)
     await _recheck(db, project)
     await db.commit()
+
+
+@router.post("/projects/{project_id}/glossary/recheck")
+async def recheck_terms(
+    project_id: uuid.UUID,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Recalculate glossary and QA warnings without changing subtitle text or timing."""
+    project = await project_for(db, project_id, user, lock=True)
+    await _no_active_job(db, project.id)
+    count = await db.scalar(select(func.count(Cue.id)).where(Cue.project_id == project.id))
+    await _recheck(db, project)
+    await db.commit()
+    return {"checked": count or 0}
 
 
 @router.post("/projects/{project_id}/glossary/extract")

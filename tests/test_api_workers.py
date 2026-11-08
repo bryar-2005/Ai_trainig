@@ -82,6 +82,19 @@ def test_real_translation_retranslation_feedback_training_and_compare(
     api.settings.allow_smoke_models = True
     api.settings.task_mode = "eager"
     model_id = register_synthetic(api, synthetic_model)
+    sample = api.client.post(
+        "/api/models/sample",
+        json={
+            "direction": "en-ckb",
+            "model_version_id": model_id,
+            "lines": ["The work is finished.", "We should go home."],
+        },
+    )
+    assert sample.status_code == 202
+    sample_job = api.client.get(f"/api/jobs/{sample.json()['job_id']}").json()
+    assert sample_job["status"] == "completed"
+    assert len(sample_job["result"]["outputs"]) == 2
+    assert any("random" in message.lower() for message in sample_job["result"]["model"]["warnings"])
     first_project = api.project("Original synthetic film", model_id)
     api.upload(first_project)
     initial = api.cues(first_project)

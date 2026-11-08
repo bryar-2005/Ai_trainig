@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from api.config import Settings
-from api.db.models import RefreshSession, User, now
+from api.db.models import PersonalApiToken, RefreshSession, User, now
 from api.db.session import get_session
 
 ACCESS_COOKIE = "sorani_access"
@@ -176,6 +176,31 @@ def check_csrf(request: Request) -> bool:
 
 
 async def current_user(request: Request, db: AsyncSession = Depends(get_session)) -> User:
+    authorization = request.headers.get("authorization")
+    if authorization is not None:
+        scheme, separator, secret = authorization.partition(" ")
+        if (
+            not separator
+            or scheme.casefold() != "bearer"
+            or not secret.startswith("sst_")
+            or len(secret) > 256
+        ):
+            raise HTTPException(status_code=401, detail="Invalid API token")
+        row = (
+            await db.execute(
+                select(User, PersonalApiToken)
+                .join(PersonalApiToken, PersonalApiToken.user_id == User.id)
+                .where(PersonalApiToken.token_hash == token_hash(secret))
+            )
+        ).one_or_none()
+        if (
+            row is None
+            or not row.User.is_active
+            or row.PersonalApiToken.revoked_at is not None
+            or _aware(row.PersonalApiToken.expires_at) <= now()
+        ):
+            raise HTTPException(status_code=401, detail="Invalid or expired API token")
+        return row.User
     value = request.cookies.get(ACCESS_COOKIE)
     if not value:
         raise HTTPException(status_code=401, detail="Authentication required")

@@ -168,6 +168,21 @@ class TrainIn(InputModel):
     allow_unverified_language: bool = False
 
 
+class SampleIn(InputModel):
+    """A small, authenticated interactive sample; output comes from a registered model."""
+
+    direction: Literal["en-ckb", "ckb-en"]
+    model_version_id: uuid.UUID
+    lines: list[str] = Field(min_length=1, max_length=3)
+
+    @field_validator("lines")
+    @classmethod
+    def bounded_text(cls, value):
+        if any(not item.strip() or len(item) > 2000 for item in value):
+            raise ValueError("Lines must be nonempty and at most 2000 characters")
+        return value
+
+
 class CompareIn(InputModel):
     direction: Literal["en-ckb", "ckb-en"]
     model_a: uuid.UUID

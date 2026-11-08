@@ -170,6 +170,36 @@ async def _prepare_translation(
         return PreparedWork(kind=kind, value=report)
 
 
+async def _prepare_sample(job_id, sessions, settings: Settings, reporter: Reporter) -> PreparedWork:
+    async with sessions() as db:
+        job = await db.get(Job, job_id)
+        if not job:
+            raise ValueError("Sample job no longer exists")
+        payload = dict(job.payload)
+        _, model = await _job_and_model(db, job_id, payload["model_version_id"])
+        if model.direction != payload["direction"]:
+            raise ValueError("Sample model direction changed")
+    await reporter.update("loading_model", 5, "Loading the selected model")
+    translator = await asyncio.to_thread(_translator, model, settings)
+    requests = [
+        TranslationRequest(
+            text=line, context=tuple(payload["lines"][:i][-translator.context_window :])
+        )
+        for i, line in enumerate(payload["lines"])
+    ]
+    generated = await asyncio.to_thread(translator.translate_batch, requests)
+    await reporter.update("sample", 95, "Translated the sample")
+    return PreparedWork(
+        kind="sample",
+        value={
+            "direction": payload["direction"],
+            "lines": payload["lines"],
+            "outputs": [item.text for item in generated],
+            "model": _public_model(translator.model_info),
+        },
+    )
+
+
 async def _prepare_compare(
     job_id, sessions, settings: Settings, reporter: Reporter
 ) -> PreparedWork:
@@ -444,6 +474,8 @@ async def prepare_work(job_id, sessions, settings: Settings, reporter: Reporter)
         return await _prepare_translation(job_id, sessions, settings, reporter)
     if kind == "compare":
         return await _prepare_compare(job_id, sessions, settings, reporter)
+    if kind == "sample":
+        return await _prepare_sample(job_id, sessions, settings, reporter)
     if kind == "train":
         return await _prepare_train(job_id, sessions, settings, reporter)
     raise ValueError("Unsupported job kind")
@@ -541,7 +573,7 @@ async def _apply_translation(db: AsyncSession, job: Job, report: dict) -> dict:
 async def apply_work(db: AsyncSession, job: Job, work: PreparedWork, settings: Settings) -> dict:
     if work.kind in {"translate", "retranslate"}:
         return await _apply_translation(db, job, work.value)
-    if work.kind == "compare":
+    if work.kind in {"compare", "sample"}:
         return work.value
     if work.kind == "train":
         versions = {uuid.UUID(cue_id): revision for cue_id, revision in job.payload["cue_versions"]}

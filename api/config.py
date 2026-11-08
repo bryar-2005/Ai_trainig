@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import EmailStr, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +23,15 @@ class Settings(BaseSettings):
     cookie_secure: bool = True
     access_minutes: int = Field(default=15, ge=1, le=60)
     refresh_days: int = Field(default=7, ge=1, le=90)
+    # Password reset is disabled until an SMTP host, sender, and public web origin are configured.
+    smtp_host: str | None = None
+    smtp_port: int = Field(default=587, ge=1, le=65535)
+    smtp_username: str | None = None
+    smtp_password: SecretStr | None = None
+    smtp_starttls: bool = True
+    smtp_sender: EmailStr | None = None
+    public_web_origin: str | None = None
+    reset_minutes: int = Field(default=30, ge=5, le=120)
     storage_backend: Literal["local", "s3"] = "local"
     storage_root: Path = Path("data/private-storage")
     model_root: Path = Path("outputs/models")
@@ -79,8 +88,38 @@ class Settings(BaseSettings):
             _ = parsed.port  # Validate the optional port as well.
         return origins
 
+    @field_validator("public_web_origin")
+    @classmethod
+    def valid_web_origin(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.rstrip("/")
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("Public web origin must be an explicit HTTP(S) origin")
+        _ = parsed.port
+        return value
+
     @model_validator(mode="after")
     def production_safety(self) -> Settings:
+        mail_settings = (self.smtp_host, self.smtp_sender, self.public_web_origin)
+        if any(mail_settings) and not all(mail_settings):
+            raise ValueError("SMTP host, sender, and public web origin are required together")
+        if bool(self.smtp_username) != bool(self.smtp_password):
+            raise ValueError("SMTP username and password must be supplied together")
+        if self.smtp_username and not self.smtp_starttls:
+            raise ValueError("SMTP authentication requires STARTTLS")
+        if self.environment == "production" and self.smtp_host:
+            if not self.smtp_starttls or not self.public_web_origin.startswith("https://"):
+                raise ValueError("Production password reset requires HTTPS and SMTP STARTTLS")
         if self.storage_backend == "s3" and not self.s3_bucket:
             raise ValueError("SORANI_S3_BUCKET is required for S3 storage")
         if self.job_heartbeat_seconds * 2 >= self.job_lease_seconds:

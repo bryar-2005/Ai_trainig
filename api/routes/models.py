@@ -19,7 +19,7 @@ from api.access import model_for
 from api.db.models import Cue, ModelVersion, Project, User
 from api.db.session import get_session
 from api.jobs import enqueue_user_job
-from api.schemas import CompareIn, ModelCreate, TrainIn
+from api.schemas import CompareIn, ModelCreate, SampleIn, TrainIn
 from api.security import current_user, require_admin
 from api.serializers import model_json
 
@@ -171,7 +171,7 @@ async def register_model(
                 raise ValueError("invalid or test-only adapter")
             expected = manifest.get("base_model_sha256")
             if local.is_dir():
-                from ml.train.model_utils import local_model_digest
+                from ml.train.model_identity import local_model_digest
 
                 if not expected or await asyncio.to_thread(local_model_digest, source) != expected:
                     raise ValueError("base identity mismatch")
@@ -316,6 +316,20 @@ async def train_model(
             "cue_versions": [[str(cue.id), cue.revision] for cue, _ in rows],
         },
     )
+    return {"job_id": str(job.id), "status": job.status}
+
+
+@router.post("/models/sample", status_code=202)
+async def sample_model(
+    payload: SampleIn,
+    request: Request,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    model = await model_for(db, payload.model_version_id, user)
+    if model.direction != payload.direction:
+        raise HTTPException(status_code=422, detail="Model direction does not match the sample")
+    job = await enqueue_user_job(db, request, user, "sample", payload.model_dump(mode="json"))
     return {"job_id": str(job.id), "status": job.status}
 
 

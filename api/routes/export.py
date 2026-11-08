@@ -7,7 +7,7 @@ import uuid
 from typing import Literal
 
 import pysubs2
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,7 +47,17 @@ def _display(cue: Cue, direction: str, bilingual: bool) -> str:
     return f"{target}\n{source}".strip()
 
 
-def render_export(cues: list[Cue], direction: str, format: str, bilingual: bool) -> str:
+def render_export(
+    cues: list[Cue],
+    direction: str,
+    format: str,
+    bilingual: bool,
+    *,
+    ass_font: str | None = None,
+    ass_font_size: int = 20,
+    ass_color: str = "#FFFFFF",
+    ass_margin: int = 10,
+) -> str:
     if format == "json":
         return (
             json.dumps(
@@ -90,9 +100,13 @@ def render_export(cues: list[Cue], direction: str, format: str, bilingual: bool)
         subtitle = pysubs2.SSAFile()
         subtitle.info["Title"] = _METADATA
         subtitle.info["ScriptType"] = "v4.00+"
-        subtitle.styles["Default"].fontname = (
-            "Noto Naskh Arabic" if direction == "en-ckb" else "Arial"
+        style = subtitle.styles["Default"]
+        style.fontname = ass_font or ("Noto Naskh Arabic" if direction == "en-ckb" else "Arial")
+        style.fontsize = ass_font_size
+        style.primarycolor = pysubs2.Color(
+            int(ass_color[1:3], 16), int(ass_color[3:5], 16), int(ass_color[5:7], 16)
         )
+        style.marginv = ass_margin
         for cue in cues:
             subtitle.append(
                 pysubs2.SSAEvent(
@@ -113,6 +127,12 @@ async def export_subtitles(
     encoding: Literal["utf-8", "utf-8-sig"] = "utf-8",
     bilingual: bool = False,
     approved_only: bool = False,
+    ass_font: str | None = Query(
+        default=None, min_length=1, max_length=80, pattern=r"^[A-Za-z0-9 _-]+$"
+    ),
+    ass_font_size: int = Query(default=20, ge=12, le=100),
+    ass_color: str = Query(default="#FFFFFF", pattern=r"^#[0-9A-Fa-f]{6}$"),
+    ass_margin: int = Query(default=10, ge=0, le=500),
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_session),
 ):
@@ -124,7 +144,16 @@ async def export_subtitles(
     if not cues:
         raise HTTPException(status_code=422, detail="There are no cues matching this export")
     try:
-        body = render_export(cues, project.direction, format, bilingual).encode(encoding)
+        body = render_export(
+            cues,
+            project.direction,
+            format,
+            bilingual,
+            ass_font=ass_font,
+            ass_font_size=ass_font_size,
+            ass_color=ass_color,
+            ass_margin=ass_margin,
+        ).encode(encoding)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     types = {
@@ -164,7 +193,19 @@ async def project_stats(
         "edited_count": edited,
         "edit_rate": edited / count if count else 0,
         "approved_count": sum(cue.status == "approved" for cue in cues),
+        "translated_count": sum(
+            bool((cue.human_text if cue.human_text is not None else cue.machine_text).strip())
+            for cue in cues
+        ),
         "average_confidence": sum(scored) / len(scored) if scored else None,
+        "confidence_histogram": [
+            sum(
+                lower <= score < upper if upper < 100 else lower <= score <= upper
+                for score in scored
+            )
+            for lower, upper in ((0, 20), (20, 40), (40, 60), (60, 80), (80, 100))
+        ],
+        "unscored_count": count - len(scored),
         "cps_violations": sum(cue.cps > project.target_cps for cue in cues),
         "hard_cps_violations": sum(cue.cps > project.hard_cps for cue in cues),
         "flagged_count": sum(cue.flagged for cue in cues),

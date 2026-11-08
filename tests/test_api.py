@@ -438,6 +438,36 @@ def test_rate_limit_fails_closed_and_returns_retry_after(api: Backend):
         assert limited.status_code == 429 and "Retry-After" in limited.headers
 
 
+def test_session_reads_do_not_consume_credential_attempt_limit(api: Backend):
+    settings = api.settings.model_copy(
+        update={"redis_url": "memory://", "auth_rate_limit": 2, "api_rate_limit": 50}
+    )
+    with TestClient(create_app(settings)) as client:
+        registered = client.post(
+            "/api/auth/register",
+            json={
+                "email": "session-limit@example.com",
+                "display_name": "Reader",
+                "password": PASSWORD,
+            },
+        )
+        assert registered.status_code == 201
+        for _ in range(10):
+            assert client.get("/api/auth/me").status_code == 200
+        assert (
+            client.post(
+                "/api/auth/login", json={"email": "missing@example.com", "password": PASSWORD}
+            ).status_code
+            == 401
+        )
+        assert (
+            client.post(
+                "/api/auth/login", json={"email": "missing@example.com", "password": PASSWORD}
+            ).status_code
+            == 429
+        )
+
+
 def test_job_cancellation_and_resumable_events(api: Backend):
     api.register()
     client = api.client
@@ -475,6 +505,14 @@ def test_job_cancellation_and_resumable_events(api: Backend):
     assert len(ids) >= 2
     resumed = client.get(f"/api/jobs/{job_id}/stream", headers={"Last-Event-ID": str(ids[0])})
     assert f"id: {ids[0]}\n" not in resumed.text and f"id: {ids[-1]}\n" in resumed.text
+    query_resume = client.get(f"/api/jobs/{job_id}/stream?after={ids[0]}")
+    assert f"id: {ids[0]}\n" not in query_resume.text and f"id: {ids[-1]}\n" in query_resume.text
+    header_wins = client.get(
+        f"/api/jobs/{job_id}/stream?after={ids[-1]}", headers={"Last-Event-ID": str(ids[0])}
+    )
+    assert f"id: {ids[-1]}\n" in header_wins.text
+    assert client.get(f"/api/jobs/{job_id}/stream?after=-1").status_code == 422
+    assert client.get(f"/api/jobs/{job_id}/stream?after=999999999999999999999").status_code == 422
     assert (
         client.get(f"/api/jobs/{job_id}/stream", headers={"Last-Event-ID": "-1"}).status_code == 400
     )

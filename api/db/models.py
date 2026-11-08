@@ -60,6 +60,35 @@ class RefreshSession(Base):
     rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class PersonalApiToken(Base):
+    """A high-entropy bearer token; only its SHA-256 digest is persisted."""
+
+    __tablename__ = "personal_api_tokens"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(120))
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PasswordReset(Base):
+    """Single-use, short-lived reset tokens, stored as digests only."""
+
+    __tablename__ = "password_resets"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class ModelVersion(Base):
     __tablename__ = "model_versions"
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -255,7 +284,7 @@ class Job(Base):
             name="ck_job_status",
         ),
         CheckConstraint(
-            "kind IN ('translate','retranslate','train','compare')", name="ck_job_kind"
+            "kind IN ('translate','retranslate','train','compare','sample')", name="ck_job_kind"
         ),
         CheckConstraint("progress >= 0 AND progress <= 100", name="ck_job_progress"),
     )

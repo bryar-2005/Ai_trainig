@@ -25,7 +25,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from api.config import Settings, get_settings
 from api.db.session import create_engine, create_session_factory
 from api.rate_limit import RateLimiter
-from api.routes import auth, cues, export, glossary, jobs, models, projects
+from api.routes import account, auth, cues, export, glossary, jobs, models, projects
 from api.security import ACCESS_COOKIE, REFRESH_COOKIE, check_csrf
 from api.storage import create_storage
 
@@ -45,9 +45,12 @@ class BodyLimitMiddleware:
             await self.app(scope, receive, send)
             return
         upload = scope.get("method") == "POST" and scope.get("path", "").endswith("/upload")
+        inspect = scope.get("method") == "POST" and scope.get("path") == "/api/subtitles/inspect"
         limit = (
             self.settings.max_subtitle_bytes + self.settings.max_video_bytes + 1024 * 1024
             if upload
+            else self.settings.max_subtitle_bytes + 1024 * 1024
+            if inspect
             else 2 * 1024 * 1024
         )
         headers = dict(scope.get("headers", []))
@@ -142,11 +145,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             if path.startswith("/api/"):
                 identity = request.client.host if request.client else "unknown"
-                category = (
-                    "auth"
-                    if path in {"/api/auth/register", "/api/auth/login", "/api/auth/refresh"}
-                    else "api"
-                )
+                # Limit credential attempts independently from routine session
+                # reads. Counting GET /auth/me as a login attempt locks normal
+                # users out while navigating, especially behind a shared proxy.
+                credential_paths = {
+                    "/api/auth/register",
+                    "/api/auth/login",
+                    "/api/auth/refresh",
+                    "/api/auth/forgot-password",
+                    "/api/auth/reset-password",
+                    "/api/account/password",
+                    "/api/account/tokens",
+                }
+                category = "auth" if method == "POST" and path in credential_paths else "api"
                 limit = settings.auth_rate_limit if category == "auth" else settings.api_rate_limit
                 try:
                     allowed = await request.app.state.limiter.check(identity, category, limit)
@@ -187,7 +198,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return response
         finally:
             route = getattr(request.scope.get("route"), "path", "unmatched")
-            status = str(response.status_code if response is not None else 500)
+            status = str(response.status_code or 500 if response is not None else 500)
             request_count.labels(method, route, status).inc()
             latency.labels(method, route).observe(time.monotonic() - started)
             logger.info(
@@ -213,7 +224,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=settings.allowed_origins,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "X-CSRF-Token", "Last-Event-ID", "Range"],
         expose_headers=["Content-Disposition", "Content-Range", "X-Subtitle-Origin"],
     )
@@ -243,6 +254,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     for router in (
         auth.router,
+        account.router,
         projects.router,
         cues.router,
         glossary.router,

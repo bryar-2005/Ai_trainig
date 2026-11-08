@@ -32,6 +32,7 @@ dist/
 
 # Node / Next.js
 node_modules/
+*.tsbuildinfo
 .next/
 .turbo/
 playwright-report/

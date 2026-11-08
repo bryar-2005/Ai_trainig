@@ -8,15 +8,16 @@ import re
 import tempfile
 import uuid
 from pathlib import Path
+from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.access import model_for, owner_clause, project_for
-from api.db.models import Cue, Job, MediaFile, Project, User
+from api.db.models import Cue, Job, MediaFile, Project, ReviewEvent, User
 from api.db.session import get_session
 from api.schemas import ProjectCreate, ProjectPatch
 from api.security import current_user
@@ -81,6 +82,26 @@ def _check_video(path: Path, suffix: str) -> None:
         raise HTTPException(status_code=422, detail="Video signature does not match its extension")
 
 
+@router.post("/subtitles/inspect")
+async def inspect_subtitle(
+    request: Request,
+    subtitle: UploadFile = File(),
+    _user: User = Depends(current_user),
+):
+    """Parse an authorized upload for a live count without creating or storing a project."""
+    _, suffix, _ = _filename(subtitle, _SUBTITLE_TYPES)
+    root = request.app.state.settings.storage_root.expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.TemporaryDirectory(prefix=".inspect-", dir=root) as temporary:
+        path = Path(temporary) / f"subtitle{suffix}"
+        await _stage_upload(subtitle, path, request.app.state.settings.max_subtitle_bytes)
+        try:
+            cues = await asyncio.to_thread(load_subtitles, path)
+        except SubtitleLoadError as exc:
+            raise HTTPException(status_code=422, detail=f"Invalid subtitle: {exc}") from exc
+        return {"cue_count": len(cues), "duration_ms": max(cue.end_ms for cue in cues)}
+
+
 @router.get("/dashboard/summary")
 async def dashboard(user: User = Depends(current_user), db: AsyncSession = Depends(get_session)):
     project_filter = owner_clause(user)
@@ -122,6 +143,9 @@ async def list_projects(
     ),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
+    sort: Literal[
+        "updated_desc", "created_desc", "created_asc", "confidence_desc", "confidence_asc"
+    ] = "updated_desc",
     user: User = Depends(current_user),
     db: AsyncSession = Depends(get_session),
 ):
@@ -132,17 +156,30 @@ async def list_projects(
     if status:
         conditions.append(Project.status == status)
     count = await db.scalar(select(func.count(Project.id)).where(*conditions))
+    averages = (
+        select(Cue.project_id.label("project_id"), func.avg(Cue.confidence_score).label("score"))
+        .group_by(Cue.project_id)
+        .subquery()
+    )
+    ordering = {
+        "updated_desc": Project.updated_at.desc(),
+        "created_desc": Project.created_at.desc(),
+        "created_asc": Project.created_at.asc(),
+        "confidence_desc": averages.c.score.desc().nulls_last(),
+        "confidence_asc": averages.c.score.asc().nulls_last(),
+    }
     items = (
-        await db.scalars(
-            select(Project)
+        await db.execute(
+            select(Project, averages.c.score)
+            .outerjoin(averages, averages.c.project_id == Project.id)
             .where(*conditions)
-            .order_by(Project.updated_at.desc(), Project.id)
+            .order_by(ordering[sort], Project.id)
             .offset((page - 1) * page_size)
             .limit(page_size)
         )
     ).all()
     return {
-        "items": [project_json(item) for item in items],
+        "items": [{**project_json(item), "average_confidence": score} for item, score in items],
         "total": count,
         "page": page,
         "page_size": page_size,
@@ -180,6 +217,40 @@ async def get_project(
         **project_json(project),
         "media": [media_json(item) for item in media],
         "cue_count": cues,
+    }
+
+
+@router.get("/projects/{project_id}/activity")
+async def project_activity(
+    project_id: uuid.UUID,
+    limit: int = Query(default=10, ge=1, le=50),
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    project = await project_for(db, project_id, user)
+    rows = (
+        await db.execute(
+            select(ReviewEvent, Cue.cue_index, User.display_name)
+            .join(Cue, Cue.id == ReviewEvent.cue_id)
+            .join(User, User.id == ReviewEvent.actor_id)
+            .where(Cue.project_id == project.id)
+            .order_by(ReviewEvent.created_at.desc(), ReviewEvent.id.desc())
+            .limit(limit)
+        )
+    ).all()
+    return {
+        "items": [
+            {
+                "id": str(event.id),
+                "cue_id": str(event.cue_id),
+                "cue_index": index,
+                "action": event.action,
+                "revision": event.cue_revision,
+                "actor": actor,
+                "created_at": event.created_at,
+            }
+            for event, index, actor in rows
+        ]
     }
 
 

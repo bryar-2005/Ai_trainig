@@ -1,6 +1,6 @@
 # English ↔ Sorani subtitle training
 
-This repository is being built in phases toward the product described in [SPEC.md](SPEC.md). **Phases 0–4 implement local data preparation, context-aware LoRA training, model evaluation, and a subtitle inference/QA engine.** There is no supplied subtitle corpus, verified gold set, pretrained checkpoint, or trained translation model in this repository. The API, web app, subtitle export service, Docker deployment, and continuous feedback are not implemented yet.
+This repository is being built in phases toward the product described in [SPEC.md](SPEC.md). It includes local data preparation, context-aware LoRA training and evaluation, a subtitle inference/QA engine, a FastAPI/Celery backend, and a multipage Next.js review workspace. There is no supplied subtitle corpus, verified gold set, pretrained checkpoint, or trained translation model in this repository. Real translation requires authorized model assets and a running worker; the interface does not substitute canned output or claim model quality.
 
 The Arena session uses the existing public `bryar-2005/Ai_trainig` repository and its fixed session branch; it does not reinitialize Git, create a separate `AI_training` remote, or push to `main`.
 
@@ -24,6 +24,18 @@ ruff check ml tests
 ```
 
 NumPy is intentionally restricted to 1.x because the current `fasttext-wheel` prediction API is incompatible with NumPy 2.x. PyArrow is also pinned to the compatible 21.x series. `.env.example` contains optional cache settings, not secrets. The CLI does not require an `.env` file.
+
+## Web workspace
+
+See [docs/frontend.md](docs/frontend.md) for the Next.js setup, browser tests, account and translation workflow, accessibility, and security/deployment notes. With the API, PostgreSQL, Redis, and Celery running as described in [docs/backend.md](docs/backend.md), use Node.js 22 or newer:
+
+```bash
+cd web
+npm ci
+npm run dev
+```
+
+Open `http://localhost:3000`, register an account, and create a project from an authorized subtitle file. An administrator must register compatible model assets before running translation. The workspace supports draft editing and export without a model. Set `INTERNAL_API_ORIGIN` on the **Next server**, not in browser code, if the API is not at its default `http://127.0.0.1:8000`.
 
 ## Local parallel subtitle layout
 

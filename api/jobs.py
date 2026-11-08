@@ -121,6 +121,7 @@ async def enqueue_retranslation(
     project: Project,
     cue: Cue,
     payload: RetranslateIn,
+    selected_model: uuid.UUID | None = None,
 ) -> Job:
     project = await project_for(db, project.id, user, lock=True)
     await _no_active_job(db, project.id)
@@ -129,7 +130,7 @@ async def enqueue_retranslation(
     )
     if not media:
         raise HTTPException(status_code=422, detail="Upload subtitles before translation")
-    model = await _model_choice(db, user, project, None)
+    model = await _model_choice(db, user, project, selected_model)
     job = Job(
         id=uuid.uuid4(),
         owner_id=user.id,
@@ -162,20 +163,20 @@ async def enqueue_retranslation(
 async def enqueue_user_job(
     db: AsyncSession, request: Request, user: User, kind: str, payload: dict
 ) -> Job:
-    # Serialise active training per owner without locking unrelated projects.
+    # Serialize expensive per-user work without locking unrelated projects.
     await db.scalar(select(User).where(User.id == user.id).with_for_update())
-    if kind == "train":
+    if kind in {"train", "sample"}:
         existing = await db.scalar(
             select(Job.id)
             .where(
                 Job.owner_id == user.id,
-                Job.kind == "train",
+                Job.kind == kind,
                 Job.status.in_(("queued", "running", "cancel_requested")),
             )
             .limit(1)
         )
         if existing:
-            raise HTTPException(status_code=409, detail="A training job is already active")
+            raise HTTPException(status_code=409, detail=f"A {kind} job is already active")
     job = Job(
         id=uuid.uuid4(),
         owner_id=user.id,

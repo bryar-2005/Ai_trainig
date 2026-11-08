@@ -1,0 +1,1 @@
+export default function Loading() { return <div className="space-y-5" aria-label="Loading"><div className="skeleton h-8 w-52" /><div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">{Array.from({length: 4}, (_, i) => <div key={i} className="skeleton h-32" />)}</div><div className="skeleton h-80" /></div>; }

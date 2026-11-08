@@ -107,6 +107,56 @@ async def list_cues(
     }
 
 
+@router.get("/projects/{project_id}/cues/locate/{cue_id}")
+async def locate_cue(
+    project_id: uuid.UUID,
+    cue_id: uuid.UUID,
+    page_size: int = Query(default=100, ge=1, le=500),
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Locate an authorized cue in the unfiltered ordered editor, including sparse indices."""
+    project = await project_for(db, project_id, user)
+    cue = await db.scalar(select(Cue).where(Cue.id == cue_id, Cue.project_id == project.id))
+    if not cue:
+        raise HTTPException(status_code=404, detail="Cue not found")
+    preceding = await db.scalar(
+        select(func.count(Cue.id)).where(
+            Cue.project_id == project.id, Cue.cue_index < cue.cue_index
+        )
+    )
+    return {"page": (preceding or 0) // page_size + 1, "cue_id": str(cue.id)}
+
+
+@router.get("/cues/{cue_id}/context")
+async def cue_context(
+    cue_id: uuid.UUID,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    cue, project = await cue_for(db, cue_id, user)
+    previous = (
+        await db.scalars(
+            select(Cue)
+            .where(Cue.project_id == project.id, Cue.cue_index < cue.cue_index)
+            .order_by(Cue.cue_index.desc())
+            .limit(3)
+        )
+    ).all()
+    following = (
+        await db.scalars(
+            select(Cue)
+            .where(Cue.project_id == project.id, Cue.cue_index > cue.cue_index)
+            .order_by(Cue.cue_index)
+            .limit(3)
+        )
+    ).all()
+    return {
+        "previous": [cue_json(item) for item in reversed(previous)],
+        "next": [cue_json(item) for item in following],
+    }
+
+
 @router.patch("/cues/{cue_id}")
 async def patch_cue(
     cue_id: uuid.UUID,

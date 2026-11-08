@@ -148,6 +148,7 @@ async def logout(request: Request, response: Response, db: AsyncSession = Depend
                 row.revoked_at = now()
                 await db.commit()
     clear_session_cookies(response, request.app.state.settings)
+    response.status_code = 204
     return response
 
 
