@@ -1,0 +1,212 @@
+name: sorani-studio
+
+x-sorani-environment: &sorani-environment
+  SORANI_ENVIRONMENT: ${SORANI_ENVIRONMENT:-development}
+  SORANI_SECRET_KEY: ${SORANI_SECRET_KEY:?Set a unique random SORANI_SECRET_KEY}
+  SORANI_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-sorani}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sorani}
+  SORANI_REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379/0
+  SORANI_BROKER_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379/1
+  SORANI_ALLOWED_ORIGINS: '${SORANI_ALLOWED_ORIGINS:-["http://localhost:3000"]}'
+  SORANI_COOKIE_SECURE: ${SORANI_COOKIE_SECURE:-false}
+  SORANI_ACCESS_MINUTES: ${SORANI_ACCESS_MINUTES:-15}
+  SORANI_REFRESH_DAYS: ${SORANI_REFRESH_DAYS:-7}
+  SORANI_SMTP_HOST: ${SORANI_SMTP_HOST:-}
+  SORANI_SMTP_PORT: ${SORANI_SMTP_PORT:-587}
+  SORANI_SMTP_USERNAME: ${SORANI_SMTP_USERNAME:-}
+  SORANI_SMTP_PASSWORD: ${SORANI_SMTP_PASSWORD:-}
+  SORANI_SMTP_STARTTLS: ${SORANI_SMTP_STARTTLS:-true}
+  SORANI_SMTP_SENDER: ${SORANI_SMTP_SENDER:-}
+  SORANI_PUBLIC_WEB_ORIGIN: ${SORANI_PUBLIC_WEB_ORIGIN:-}
+  SORANI_RESET_MINUTES: ${SORANI_RESET_MINUTES:-30}
+  SORANI_MAX_SUBTITLE_BYTES: ${SORANI_MAX_SUBTITLE_BYTES:-5242880}
+  SORANI_MAX_VIDEO_BYTES: ${SORANI_MAX_VIDEO_BYTES:-2147483648}
+  SORANI_AUTH_RATE_LIMIT: ${SORANI_AUTH_RATE_LIMIT:-20}
+  SORANI_API_RATE_LIMIT: ${SORANI_API_RATE_LIMIT:-300}
+  SORANI_RATE_WINDOW_SECONDS: ${SORANI_RATE_WINDOW_SECONDS:-60}
+  SORANI_JOB_LEASE_SECONDS: ${SORANI_JOB_LEASE_SECONDS:-120}
+  SORANI_JOB_HEARTBEAT_SECONDS: ${SORANI_JOB_HEARTBEAT_SECONDS:-10}
+  SORANI_STORAGE_BACKEND: s3
+  SORANI_STORAGE_ROOT: /app/data/private-storage
+  SORANI_MODEL_ROOT: /app/outputs/models
+  SORANI_S3_BUCKET: ${SORANI_S3_BUCKET:-sorani-private}
+  SORANI_S3_ENDPOINT_URL: http://minio:9000
+  SORANI_S3_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: ${MINIO_APP_ACCESS_KEY:?Set MINIO_APP_ACCESS_KEY}
+  AWS_SECRET_ACCESS_KEY: ${MINIO_APP_SECRET_KEY:?Set MINIO_APP_SECRET_KEY}
+  HF_HOME: /app/data/cache/huggingface
+  HF_HUB_DISABLE_TELEMETRY: "1"
+  SORANI_LOCAL_FILES_ONLY: ${SORANI_LOCAL_FILES_ONLY:-true}
+  SORANI_NIGHTLY_FEEDBACK_EXPORT_ENABLED: ${SORANI_NIGHTLY_FEEDBACK_EXPORT_ENABLED:-false}
+  SORANI_FEEDBACK_EXPORT_RETENTION_DAYS: ${SORANI_FEEDBACK_EXPORT_RETENTION_DAYS:-7}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sorani}
+      POSTGRES_DB: ${POSTGRES_DB:-sorani}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD}
+    command: ["sh", "-ec", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: sorani-minio:source
+    build:
+      context: .
+      dockerfile: docker/minio.Dockerfile
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: sorani-minio:source
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_started
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+      MINIO_APP_ACCESS_KEY: ${MINIO_APP_ACCESS_KEY:?Set MINIO_APP_ACCESS_KEY}
+      MINIO_APP_SECRET_KEY: ${MINIO_APP_SECRET_KEY:?Set MINIO_APP_SECRET_KEY}
+      SORANI_S3_BUCKET: ${SORANI_S3_BUCKET:-sorani-private}
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        attempts=0
+        until mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; do
+          attempts=$$((attempts + 1))
+          if [ "$$attempts" -ge 60 ]; then echo "MinIO did not become ready" >&2; exit 1; fi
+          sleep 2
+        done
+        case "$$SORANI_S3_BUCKET" in *[!a-z0-9.-]*|'') echo "Invalid bucket name" >&2; exit 1;; esac
+        if [ "$$MINIO_APP_ACCESS_KEY" = "$$MINIO_ROOT_USER" ] || [ "$$MINIO_APP_SECRET_KEY" = "$$MINIO_ROOT_PASSWORD" ]; then
+          echo "Application and root MinIO credentials must be distinct" >&2; exit 1
+        fi
+        mc mb --ignore-existing "local/$$SORANI_S3_BUCKET"
+        mc anonymous set none "local/$$SORANI_S3_BUCKET"
+        printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:ListBucket"],"Resource":["arn:aws:s3:::%s"]},{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject"],"Resource":["arn:aws:s3:::%s/*"]}]}' "$$SORANI_S3_BUCKET" "$$SORANI_S3_BUCKET" > /tmp/sorani-policy.json
+        mc admin policy create local sorani-workspace /tmp/sorani-policy.json >/dev/null
+        if ! mc admin user info local "$$MINIO_APP_ACCESS_KEY" >/dev/null 2>&1; then
+          mc admin user add local "$$MINIO_APP_ACCESS_KEY" "$$MINIO_APP_SECRET_KEY" >/dev/null
+        fi
+        mc admin policy attach local sorani-workspace --user "$$MINIO_APP_ACCESS_KEY" >/dev/null
+        mc alias set app http://minio:9000 "$$MINIO_APP_ACCESS_KEY" "$$MINIO_APP_SECRET_KEY" >/dev/null
+        mc ls "app/$$SORANI_S3_BUCKET" >/dev/null
+
+  migrate:
+    image: sorani-api:local
+    build:
+      context: .
+      target: api
+    restart: "no"
+    environment: *sorani-environment
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
+  api:
+    image: sorani-api:local
+    restart: unless-stopped
+    environment: *sorani-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - private-scratch:/app/data/private-storage
+      - model-assets:/app/outputs/models:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  worker-cpu:
+    image: sorani-worker:cpu
+    build:
+      context: .
+      target: worker
+      args:
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
+    restart: unless-stopped
+    environment:
+      <<: *sorani-environment
+      SORANI_INFERENCE_DEVICE: cpu
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - private-scratch:/app/data/private-storage
+      - model-assets:/app/outputs/models
+      - huggingface-cache:/app/data/cache/huggingface
+
+  beat:
+    image: sorani-api:local
+    restart: unless-stopped
+    environment: *sorani-environment
+    command: ["celery", "-A", "api.worker:celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/celerybeat-schedule"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - private-scratch:/app/data/private-storage
+
+  web:
+    image: sorani-web:local
+    build:
+      context: ./web
+      args:
+        INTERNAL_API_ORIGIN: http://api:8000
+    restart: unless-stopped
+    environment:
+      INTERNAL_API_ORIGIN: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
+  private-scratch:
+  model-assets:
+  huggingface-cache:

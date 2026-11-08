@@ -1,0 +1,24 @@
+# Use with: docker compose -f compose.yaml -f compose.gpu.yaml --profile gpu up --build
+# NVIDIA Container Toolkit and a compatible host driver are required.
+services:
+  worker-cpu:
+    profiles: [cpu]
+
+  worker-gpu:
+    extends:
+      file: compose.yaml
+      service: worker-cpu
+    profiles: [gpu]
+    image: sorani-worker:gpu
+    build:
+      args:
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu124
+    environment:
+      SORANI_INFERENCE_DEVICE: cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

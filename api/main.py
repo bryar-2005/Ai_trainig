@@ -25,7 +25,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from api.config import Settings, get_settings
 from api.db.session import create_engine, create_session_factory
 from api.rate_limit import RateLimiter
-from api.routes import account, auth, cues, export, glossary, jobs, models, projects
+from api.routes import account, auth, cues, export, feedback, glossary, jobs, models, projects
 from api.security import ACCESS_COOKIE, REFRESH_COOKIE, check_csrf
 from api.storage import create_storage
 
@@ -255,6 +255,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     for router in (
         auth.router,
         account.router,
+        feedback.router,
         projects.router,
         cues.router,
         glossary.router,

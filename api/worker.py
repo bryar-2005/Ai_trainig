@@ -13,6 +13,7 @@ from datetime import UTC, timedelta
 from typing import Any
 
 from celery import Celery
+from celery.schedules import crontab
 from dotenv import dotenv_values
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -38,8 +39,18 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     broker_transport_options={"visibility_timeout": 7200},
     task_ignore_result=True,
+    timezone="UTC",
+    enable_utc=True,
     beat_schedule={
-        "recover-undelivered-jobs": {"task": "api.requeue_stale_jobs", "schedule": 30.0}
+        "recover-undelivered-jobs": {"task": "api.requeue_stale_jobs", "schedule": 30.0},
+        "nightly-private-feedback-exports": {
+            "task": "api.schedule_feedback_exports",
+            "schedule": crontab(hour=2, minute=0),
+        },
+        "clean-expired-feedback-exports": {
+            "task": "api.cleanup_feedback_exports",
+            "schedule": 3600.0,
+        },
     },
 )
 
@@ -53,6 +64,7 @@ class PreparedWork:
     kind: str
     value: Any
     cleanup_path: str | None = None
+    cleanup_export_id: uuid.UUID | None = None
 
 
 class Reporter:
@@ -268,6 +280,21 @@ async def run_job(job_id: uuid.UUID, settings: Settings) -> str:
                 await heartbeat
         if prepared and prepared.cleanup_path:
             await asyncio.to_thread(shutil.rmtree, prepared.cleanup_path, ignore_errors=True)
+        if prepared and prepared.cleanup_export_id and not completed:
+            from api.feedback_tasks import discard_pending_export
+            from api.storage import create_storage
+
+            try:
+                await discard_pending_export(
+                    prepared.cleanup_export_id,
+                    lease_token,
+                    sessions,
+                    create_storage(settings),
+                    settings,
+                )
+            except Exception:
+                # The tracked pending object remains eligible for periodic cleanup.
+                logger.error("feedback_cleanup_failed job_id=%s", job_id)
         if claimed and not completed:
             # Only this job's private partial training output is removed; a busy
             # duplicate delivery must never remove a live worker's artifacts.
@@ -335,6 +362,20 @@ async def requeue_stale_jobs(settings: Settings) -> int:
 @celery_app.task(name="api.requeue_stale_jobs")
 def recover_jobs():
     return asyncio.run(requeue_stale_jobs(get_settings()))
+
+
+@celery_app.task(name="api.schedule_feedback_exports")
+def schedule_feedback_exports():
+    from api.feedback_tasks import schedule_nightly_feedback_exports
+
+    return asyncio.run(schedule_nightly_feedback_exports(get_settings()))
+
+
+@celery_app.task(name="api.cleanup_feedback_exports")
+def cleanup_exports():
+    from api.feedback_tasks import cleanup_feedback_exports
+
+    return asyncio.run(cleanup_feedback_exports(get_settings()))
 
 
 @celery_app.task(bind=True, name="api.execute_job", max_retries=None)

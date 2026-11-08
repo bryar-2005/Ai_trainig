@@ -44,6 +44,7 @@ def test_profile_preferences_and_personal_tokens(api: Backend):
         "default_target_cps": 19,
         "default_max_chars": 38,
         "default_export_encoding": "utf-8-sig",
+        "nightly_feedback_export": False,
     }
     assert (
         client.put("/api/account/preferences", json=preferences).json()["preferences"]

@@ -305,8 +305,22 @@ async def delete_project(
     project = await project_for(db, project_id, user, lock=True)
     await _no_active_job(db, project.id)
     media = (await db.scalars(select(MediaFile).where(MediaFile.project_id == project.id))).all()
-    for item in media:
+    # Snapshots may contain this project's text. Invalidate all of the owner's
+    # snapshots, including in-progress uploads, before deleting the project.
+    from api.db.models import FeedbackExport
+
+    snapshots = (
+        await db.scalars(
+            select(FeedbackExport)
+            .where(FeedbackExport.owner_id == project.owner_id)
+            .order_by(FeedbackExport.id)
+            .with_for_update()
+        )
+    ).all()
+    for item in [*media, *snapshots]:
         await asyncio.to_thread(request.app.state.storage.delete, item.storage_key)
+    for item in snapshots:
+        await db.delete(item)
     await db.delete(project)
     await db.commit()
     return Response(status_code=204)

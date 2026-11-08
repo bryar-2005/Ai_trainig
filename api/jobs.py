@@ -165,7 +165,7 @@ async def enqueue_user_job(
 ) -> Job:
     # Serialize expensive per-user work without locking unrelated projects.
     await db.scalar(select(User).where(User.id == user.id).with_for_update())
-    if kind in {"train", "sample"}:
+    if kind in {"train", "sample", "feedback_export"}:
         existing = await db.scalar(
             select(Job.id)
             .where(

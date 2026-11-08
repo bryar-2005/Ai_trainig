@@ -270,6 +270,8 @@ class Job(Base):
     stage: Mapped[str] = mapped_column(String(80), default="queued")
     progress: Mapped[float] = mapped_column(Float, default=0.0)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # Nullable for ordinary jobs; scheduled jobs use a unique user/date key.
+    schedule_key: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True)
     result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
@@ -284,9 +286,40 @@ class Job(Base):
             name="ck_job_status",
         ),
         CheckConstraint(
-            "kind IN ('translate','retranslate','train','compare','sample')", name="ck_job_kind"
+            "kind IN ('translate','retranslate','train','compare','sample','feedback_export')",
+            name="ck_job_kind",
         ),
         CheckConstraint("progress >= 0 AND progress <= 100", name="ck_job_progress"),
+    )
+
+
+class FeedbackExport(Base):
+    """Private retained snapshot; pending objects are tracked before upload."""
+
+    __tablename__ = "feedback_exports"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("jobs.id", ondelete="CASCADE"), index=True
+    )
+    lease_token: Mapped[uuid.UUID] = mapped_column(Uuid)
+    storage_key: Mapped[str] = mapped_column(String(255), unique=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    direction: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    cue_count: Mapped[int] = mapped_column(Integer)
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    sha256: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    __table_args__ = (
+        CheckConstraint("status IN ('pending','ready')", name="ck_feedback_export_status"),
+        CheckConstraint(
+            "direction IS NULL OR direction IN ('en-ckb','ckb-en')",
+            name="ck_feedback_export_direction",
+        ),
+        CheckConstraint("cue_count > 0 AND size_bytes > 0", name="ck_feedback_export_size"),
     )
 
 

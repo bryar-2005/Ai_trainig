@@ -68,6 +68,7 @@ sorani-merge-adapter = "ml.train.merge_adapter:main"
 sorani-evaluate = "ml.eval.evaluate:main"
 sorani-translate = "ml.inference.pipeline:main"
 sorani-create-admin = "api.db.seed:main"
+sorani-create-demo = "api.db.seed_demo:main"
 
 [tool.setuptools.packages.find]
 include = ["ml*", "api*"]

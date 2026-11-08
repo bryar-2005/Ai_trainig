@@ -7,16 +7,20 @@ import gc
 import hashlib
 import json
 import math
+import os
+import shutil
 import tempfile
 import uuid
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.config import Settings
-from api.db.models import Cue, Job, MediaFile, ModelVersion, Project, User
+from api.db.models import Cue, FeedbackExport, Job, MediaFile, ModelVersion, Project, User, now
+from api.feedback import approved_feedback, feedback_row
 from api.review import cue_snapshot, log_change, recalculate_cue, terms_for, update_project_status
 from api.storage import create_storage
 from api.worker import JobCancelled, PreparedWork, Reporter
@@ -464,6 +468,110 @@ async def _prepare_train(job_id, sessions, settings: Settings, reporter: Reporte
     )
 
 
+def _write_feedback_records(path: Path, records: list[dict]) -> tuple[int, str]:
+    digest, size = hashlib.sha256(), 0
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as output:
+        for record in records:
+            line = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
+                "utf-8"
+            )
+            output.write(line)
+            digest.update(line)
+            size += len(line)
+    return size, digest.hexdigest()
+
+
+async def _prepare_feedback_export(
+    job_id: uuid.UUID, sessions, settings: Settings, reporter: Reporter
+) -> PreparedWork:
+    """Stage a tracked private snapshot; never place subtitle text in job results."""
+    from api.feedback_tasks import discard_pending_export
+
+    async with sessions() as db:
+        job = await db.get(Job, job_id)
+        owner = await db.get(User, job.owner_id) if job else None
+        if not job or not owner or not owner.is_active:
+            raise ValueError("Feedback export owner is unavailable")
+        payload = dict(job.payload)
+        if payload.get("scheduled") and (
+            not settings.nightly_feedback_export_enabled
+            or not owner.preferences.get("nightly_feedback_export", False)
+        ):
+            raise JobCancelled()
+        rows = await approved_feedback(db, owner, payload.get("direction"))
+        versions = [[str(cue.id), cue.revision, str(project.id)] for cue, project in rows]
+        records = [feedback_row(cue, project) for cue, project in rows]
+        owner_id = owner.id
+    await reporter.update("prepare_feedback", 10, f"Preparing {len(records)} approved edits")
+    if not records:
+        return PreparedWork(kind="feedback_export", value={"empty": True})
+    export_id = uuid.uuid4()
+    key = f"feedback-exports/{owner_id}/{job_id}/{export_id}.jsonl"
+    from api.feedback_tasks import feedback_scratch_path
+
+    temp = feedback_scratch_path(settings, export_id)
+    storage = create_storage(settings)
+    try:
+        async with sessions() as db:
+            job = await db.scalar(select(Job).where(Job.id == job_id).with_for_update())
+            if not job or job.lease_token != reporter.lease_token or job.status != "running":
+                raise JobCancelled()
+            # A pending row is durable before any private staging data exists.
+            # Temporary size/hash values are never exposed while the row is pending.
+            db.add(
+                FeedbackExport(
+                    id=export_id,
+                    owner_id=owner_id,
+                    job_id=job_id,
+                    lease_token=reporter.lease_token,
+                    storage_key=key,
+                    status="pending",
+                    direction=payload.get("direction"),
+                    cue_count=len(records),
+                    size_bytes=1,
+                    sha256="0" * 64,
+                    expires_at=now() + timedelta(days=settings.feedback_export_retention_days),
+                )
+            )
+            await db.commit()
+        # Keep the row locked throughout staging/upload. Project deletion and
+        # cleanup therefore cannot race a writer and leave an orphan object.
+        async with sessions() as db:
+            item = await db.scalar(
+                select(FeedbackExport).where(FeedbackExport.id == export_id).with_for_update()
+            )
+            if not item:
+                raise JobCancelled()
+            temp.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            temp.mkdir(exist_ok=False, mode=0o700)
+            path = temp / "approved-feedback.jsonl"
+            item.size_bytes, item.sha256 = await asyncio.to_thread(
+                _write_feedback_records, path, records
+            )
+            await asyncio.to_thread(storage.put_file, path, key, "application/x-ndjson")
+            await db.commit()
+        await reporter.update(
+            "store_feedback", 95, "Saved a private snapshot; validating revisions"
+        )
+        return PreparedWork(
+            kind="feedback_export",
+            value={"export_id": str(export_id), "versions": versions},
+            cleanup_path=str(temp),
+            cleanup_export_id=export_id,
+        )
+    except BaseException:
+        try:
+            await discard_pending_export(
+                export_id, reporter.lease_token, sessions, storage, settings
+            )
+        except Exception:
+            # The pending row and scratch directory remain eligible for cleanup.
+            pass
+        await asyncio.to_thread(shutil.rmtree, temp, ignore_errors=True)
+        raise
+
+
 async def prepare_work(job_id, sessions, settings: Settings, reporter: Reporter) -> PreparedWork:
     async with sessions() as db:
         job = await db.get(Job, job_id)
@@ -476,6 +584,8 @@ async def prepare_work(job_id, sessions, settings: Settings, reporter: Reporter)
         return await _prepare_compare(job_id, sessions, settings, reporter)
     if kind == "sample":
         return await _prepare_sample(job_id, sessions, settings, reporter)
+    if kind == "feedback_export":
+        return await _prepare_feedback_export(job_id, sessions, settings, reporter)
     if kind == "train":
         return await _prepare_train(job_id, sessions, settings, reporter)
     raise ValueError("Unsupported job kind")
@@ -575,6 +685,67 @@ async def apply_work(db: AsyncSession, job: Job, work: PreparedWork, settings: S
         return await _apply_translation(db, job, work.value)
     if work.kind in {"compare", "sample"}:
         return work.value
+    if work.kind == "feedback_export":
+        if work.value.get("empty"):
+            return {"export_id": None, "cue_count": 0}
+        versions = {
+            uuid.UUID(cue_id): (revision, uuid.UUID(project_id))
+            for cue_id, revision, project_id in work.value["versions"]
+        }
+        project_ids = {project_id for _, project_id in versions.values()}
+        projects = (
+            await db.scalars(
+                select(Project)
+                .where(Project.id.in_(project_ids))
+                .order_by(Project.id)
+                .with_for_update()
+            )
+        ).all()
+        cues = (
+            await db.scalars(
+                select(Cue).where(Cue.id.in_(versions)).order_by(Cue.id).with_for_update()
+            )
+        ).all()
+        owner = await db.scalar(select(User).where(User.id == job.owner_id).with_for_update())
+        if (
+            not owner
+            or not owner.is_active
+            or (
+                job.payload.get("scheduled")
+                and (
+                    not settings.nightly_feedback_export_enabled
+                    or not owner.preferences.get("nightly_feedback_export", False)
+                )
+            )
+            or len(projects) != len(project_ids)
+            or any(project.owner_id != job.owner_id for project in projects)
+            or len(cues) != len(versions)
+            or any(
+                cue.project_id != versions[cue.id][1]
+                or cue.revision != versions[cue.id][0]
+                or cue.status != "approved"
+                or not cue.source_text.strip()
+                or not cue.human_text
+                or not cue.human_text.strip()
+                or cue.human_text == cue.machine_text
+                for cue in cues
+            )
+        ):
+            raise ValueError("Feedback changed before the export could be committed")
+        item = await db.scalar(
+            select(FeedbackExport)
+            .where(FeedbackExport.id == uuid.UUID(work.value["export_id"]))
+            .with_for_update()
+        )
+        if not item or item.status != "pending" or item.lease_token != job.lease_token:
+            raise ValueError("The pending feedback export is no longer available")
+        item.status = "ready"
+        return {
+            "export_id": str(item.id),
+            "cue_count": item.cue_count,
+            "sha256": item.sha256,
+            "expires_at": item.expires_at.isoformat(),
+        }
     if work.kind == "train":
         versions = {uuid.UUID(cue_id): revision for cue_id, revision in job.payload["cue_versions"]}
         project_ids = (

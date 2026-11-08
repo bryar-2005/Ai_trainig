@@ -7,18 +7,19 @@ import json
 import re
 import uuid
 from pathlib import Path
-from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.access import model_for
-from api.db.models import Cue, ModelVersion, Project, User
+from api.db.models import ModelVersion, User
 from api.db.session import get_session
+from api.feedback import approved_feedback as _feedback
+from api.feedback import feedback_row as _feedback_row
 from api.jobs import enqueue_user_job
+from api.routes.feedback import FeedbackExportIn
 from api.schemas import CompareIn, ModelCreate, SampleIn, TrainIn
 from api.security import current_user, require_admin
 from api.serializers import model_json
@@ -47,52 +48,6 @@ def _model_source(value: str, root: Path) -> str:
             status_code=422, detail="Model source must be a trusted local directory or Hub ID"
         )
     return value
-
-
-async def _feedback(db: AsyncSession, user: User, direction: str | None = None):
-    # A workspace's feedback export never silently includes another user's text,
-    # even when an administrator can inspect their projects individually.
-    query = (
-        select(Cue, Project)
-        .join(Project, Project.id == Cue.project_id)
-        .where(
-            Project.owner_id == user.id,
-            Cue.status == "approved",
-            Cue.human_text.is_not(None),
-            Cue.human_text != Cue.machine_text,
-            Cue.source_text != "",
-            Cue.human_text != "",
-        )
-        .order_by(Project.id, Cue.cue_index)
-    )
-    if direction:
-        query = query.where(Project.direction == direction)
-    return (await db.execute(query)).all()
-
-
-def _feedback_row(cue: Cue, project: Project) -> dict:
-    source, target = cue.source_text, cue.human_text or ""
-    english, sorani = (source, target) if project.direction == "en-ckb" else (target, source)
-    return {
-        "pair_id": str(cue.id),
-        "film_id": str(project.id),
-        "english": english,
-        "sorani": sorani,
-        "english_start_ms": cue.start_ms,
-        "english_end_ms": cue.end_ms,
-        "sorani_start_ms": cue.start_ms,
-        "sorani_end_ms": cue.end_ms,
-        "english_speakers": cue.speaker_labels if project.direction == "en-ckb" else [],
-        "sorani_speakers": cue.speaker_labels if project.direction == "ckb-en" else [],
-        "provenance": "human",
-        "review_status": "verified",
-        "language_verified": False,
-        "machine_text": cue.machine_text,
-        "human_text": cue.human_text,
-        "model_version_id": str(cue.model_version_id) if cue.model_version_id else None,
-        "source_cue_ids": cue.source_cue_ids,
-        "cue_revision": cue.revision,
-    }
 
 
 @router.get("/models")
@@ -249,11 +204,6 @@ async def activate_model(
     user.preferences = prefs
     await db.commit()
     return model_json(model, active=True)
-
-
-class FeedbackExportIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    direction: Literal["en-ckb", "ckb-en"] | None = None
 
 
 @router.post("/feedback/export")

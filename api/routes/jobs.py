@@ -84,7 +84,7 @@ async def retry_job(
 ):
     """Create a fresh job, re-running the original validation and concurrency checks."""
     from api.access import cue_for
-    from api.jobs import enqueue_retranslation
+    from api.jobs import enqueue_retranslation, enqueue_user_job
     from api.routes.models import _feedback, compare_models, sample_model, train_model
     from api.schemas import CompareIn, RetranslateIn, SampleIn, TrainIn
 
@@ -145,6 +145,15 @@ async def retry_job(
         return await compare_models(CompareIn(**payload), request, user, db)
     if previous.kind == "sample":
         return await sample_model(SampleIn(**payload), request, user, db)
+    if previous.kind == "feedback_export":
+        job = await enqueue_user_job(
+            db,
+            request,
+            user,
+            "feedback_export",
+            {"direction": payload.get("direction"), "scheduled": False},
+        )
+        return {"job_id": str(job.id), "status": job.status}
     raise HTTPException(status_code=422, detail="This job cannot be retried")
 
 

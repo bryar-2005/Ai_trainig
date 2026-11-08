@@ -1,6 +1,6 @@
 # English ↔ Sorani subtitle training
 
-This repository is being built in phases toward the product described in [SPEC.md](SPEC.md). It includes local data preparation, context-aware LoRA training and evaluation, a subtitle inference/QA engine, a FastAPI/Celery backend, and a multipage Next.js review workspace. There is no supplied subtitle corpus, verified gold set, pretrained checkpoint, or trained translation model in this repository. Real translation requires authorized model assets and a running worker; the interface does not substitute canned output or claim model quality.
+This repository implements the workflow described in [SPEC.md](SPEC.md). It includes local data preparation, context-aware LoRA training and evaluation, a subtitle inference/QA engine, a FastAPI/Celery backend, and a multipage Next.js review workspace. There is no supplied subtitle corpus, verified gold set, pretrained checkpoint, or trained translation model in this repository. Real translation requires authorized model assets and a running worker; the interface does not substitute canned output or claim model quality.
 
 The Arena session uses the existing public `bryar-2005/Ai_trainig` repository and its fixed session branch; it does not reinitialize Git, create a separate `AI_training` remote, or push to `main`.
 
@@ -293,7 +293,7 @@ A callback may raise an exception to stop the operation; the programmatic functi
 
 ## Backend API and workers
 
-The FastAPI/PostgreSQL backend and Celery/Redis workers support private projects, review, exports, resumable job progress and continued training. See **[backend setup and operational guidance](docs/backend.md)** for installation, migrations, secure administrator bootstrap, worker/beat commands, API security, private storage, model registration, feedback safeguards and integration tests. No pretrained weights or real evaluation results are included. The Next.js frontend and deployment packaging are not yet implemented.
+The FastAPI/PostgreSQL backend and Celery/Redis workers support private projects, review, exports, resumable job progress and continued training. See **[backend setup and operational guidance](docs/backend.md)** for installation, migrations, administrator bootstrap, API security, storage, model registration, feedback safeguards and tests. The real multipage Next.js application is described in **[frontend.md](docs/frontend.md)**; CPU/GPU Compose, TLS, model provisioning, privacy and backups are covered in **[deployment.md](docs/deployment.md)**. No pretrained weights, real subtitle corpus or quality results are included.
 
 ## Tests and limitations
 

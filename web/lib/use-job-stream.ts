@@ -53,6 +53,7 @@ export function useJobStream(jobId: string, enabled = true) {
         stream.close(); if (stopped) return;
         clearTimeout(invalidateTimer); status("finished"); invalidate();
         void client.invalidateQueries({ queryKey: ["jobs"] }); void client.invalidateQueries({ queryKey: ["dashboard"] });
+        void client.invalidateQueries({ queryKey: ["feedback-exports"] }); void client.invalidateQueries({ queryKey: ["models"] });
       });
       stream.addEventListener("auth_expired", () => {
         stream.close(); if (stopped) return; status("reconnecting");

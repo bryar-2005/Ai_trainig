@@ -12,7 +12,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="SORANI_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="SORANI_", env_file=".env", env_ignore_empty=True, extra="ignore"
+    )
 
     environment: Literal["development", "production", "test"] = "development"
     database_url: str = "postgresql+asyncpg://sorani:sorani@localhost:5432/sorani"
@@ -48,6 +50,9 @@ class Settings(BaseSettings):
     allow_smoke_models: bool = False
     job_lease_seconds: int = Field(default=120, ge=30, le=3600)
     job_heartbeat_seconds: int = Field(default=10, ge=2, le=300)
+    # Scheduled exports are disabled until both operator and user opt in.
+    nightly_feedback_export_enabled: bool = False
+    feedback_export_retention_days: int = Field(default=7, ge=1, le=30)
     # Tests may execute Celery tasks synchronously or suppress dispatch explicitly.
     # Neither mode is permitted in production.
     task_mode: Literal["celery", "eager", "manual"] = "celery"

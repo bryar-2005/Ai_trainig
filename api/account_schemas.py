@@ -13,6 +13,7 @@ class PreferencesIn(Input):
     default_target_cps: float = Field(default=17, gt=0, le=100, allow_inf_nan=False)
     default_max_chars: int = Field(default=42, ge=1, le=200)
     default_export_encoding: Literal["utf-8", "utf-8-sig"] = "utf-8"
+    nightly_feedback_export: bool = False
 
 
 class ProfileIn(Input):
