@@ -13,6 +13,7 @@ from peft import PeftModel
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, set_seed
 
 from ml.eval.records import EvaluationRecord, file_sha256
+from ml.train.checkpoint import restore_m2m100_tied_weights
 from ml.train.dataset import token_ids, tokenize_example
 from ml.train.model_utils import local_model_digest, resize_embeddings_for_tokenizer
 
@@ -101,6 +102,7 @@ def generate_comparison(
         revision=revision,
         local_files_only=local_files_only or bool(manifest.get("smoke_test")),
     )
+    restore_m2m100_tied_weights(base, source, revision=revision)
     loaded_revision = getattr(base.config, "_commit_hash", None)
     if revision and loaded_revision and loaded_revision != revision:
         raise ValueError("Loaded base revision does not match the adapter")

@@ -39,6 +39,7 @@ from transformers import (
 from transformers.trainer import TRAINING_ARGS_NAME
 from transformers.trainer_utils import get_last_checkpoint
 
+from ml.train.checkpoint import restore_m2m100_tied_weights
 from ml.train.config import RunConfig, load_config, validate_config
 from ml.train.dataset import (
     ContextExample,
@@ -590,6 +591,7 @@ def run_training(
                 trust_remote_code=False,
                 **model_kwargs,
             )
+            restore_m2m100_tied_weights(base_model, load_source, revision=requested_revision)
             resolved_revision = (
                 None
                 if base_digest is not None

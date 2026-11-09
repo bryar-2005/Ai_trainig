@@ -165,6 +165,99 @@ def test_continued_cached_hub_adapter_never_attempts_network(smoke_run, tmp_path
     assert result["status"] == "completed" and result["base_revision_resolved"] == commit
 
 
+def test_alias_checkpoint_works_for_continued_training_merge_and_evaluation(smoke_run, tmp_path):
+    from safetensors.torch import save_file
+
+    from ml.eval.model_compare import generate_comparison
+    from ml.eval.records import EvaluationRecord
+    from ml.train.model_utils import local_model_digest
+
+    root, config, training_manifest = smoke_run
+    original_base = root / "run" / "smoke_base"
+    original_adapter = root / "run" / "adapter"
+    base = tmp_path / "base"
+    adapter = tmp_path / "adapter"
+    shutil.copytree(original_base, base)
+    shutil.copytree(original_adapter, adapter)
+
+    weights_path = base / "model.safetensors"
+    weights = load_file(str(weights_path))
+    retained = "model.decoder.embed_tokens.weight"
+    weights[retained] = weights.pop("model.shared.weight").clone()
+    replacement = base / "replacement.safetensors"
+    save_file(
+        weights,
+        str(replacement),
+        metadata={
+            "format": "pt",
+            "model.shared.weight": retained,
+            "model.encoder.embed_tokens.weight": retained,
+            "lm_head.weight": retained,
+        },
+    )
+    replacement.replace(weights_path)
+    saved_checkpoint = weights_path.read_bytes()
+    manifest_path = adapter / "training_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update(actual_base_model=str(base), base_model_sha256=local_model_digest(base))
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    row = _rows("test", 1)[0]
+    example = make_context_examples([row], direction="en-ckb")[0]
+    records = [
+        EvaluationRecord(
+            pair_id=row["pair_id"],
+            film_id=row["film_id"],
+            source=row["english"],
+            reference=row["sorani"],
+            duration_ms=2000,
+            provenance=row["provenance"],
+            example=example,
+        )
+    ]
+    arguments = {
+        "direction": "en-ckb",
+        "dataset_sha256": training_manifest["dataset_sha256"],
+        "local_files_only": True,
+        "allow_smoke_model": True,
+    }
+    expected_base, expected_adapter, _ = generate_comparison(
+        records, adapter_dir=original_adapter, **arguments
+    )
+    actual_base, actual_adapter, info = generate_comparison(
+        records, adapter_dir=adapter, **arguments
+    )
+    assert (actual_base, actual_adapter) == (expected_base, expected_adapter)
+    assert info["smoke_model"]
+
+    merged = tmp_path / "merged"
+    report = merge_adapter(adapter, merged, local_files_only=True)
+    assert report["base_identity_verified"] and report["smoke_test"]
+    merged_model = AutoModelForSeq2SeqLM.from_pretrained(str(merged), local_files_only=True).eval()
+    reference_base = AutoModelForSeq2SeqLM.from_pretrained(
+        str(original_base), local_files_only=True
+    )
+    tokenizer = AutoTokenizer.from_pretrained(str(original_adapter), local_files_only=True)
+    resize_embeddings_for_tokenizer(reference_base, tokenizer)
+    reference = PeftModel.from_pretrained(reference_base, str(original_adapter)).eval()
+    tokens = torch.tensor([[training_manifest["source_language_id"], tokenizer.eos_token_id]])
+    decoder = torch.tensor([[tokenizer.eos_token_id, training_manifest["target_language_id"]]])
+    with torch.inference_mode():
+        expected = reference(input_ids=tokens, decoder_input_ids=decoder).logits
+        actual = merged_model(input_ids=tokens, decoder_input_ids=decoder).logits
+    assert torch.allclose(expected, actual, atol=1e-6, rtol=1e-5)
+
+    continued = replace(
+        train_lora._smoke_config(config),
+        base_model=str(base),
+        output_dir=str(tmp_path / "continued"),
+        local_files_only=True,
+    )
+    result = run_training(continued, initial_adapter=adapter)
+    assert result["status"] == "completed" and result["smoke_test"]
+    assert weights_path.read_bytes() == saved_checkpoint
+
+
 def test_resume_rejects_changed_config_and_output_reuse(smoke_run):
     root, config, _ = smoke_run
     with pytest.raises(ValueError, match="differs"):

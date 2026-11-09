@@ -12,6 +12,7 @@ import torch
 from peft import PeftModel
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
+from ml.train.checkpoint import restore_m2m100_tied_weights
 from ml.train.dataset import token_ids
 from ml.train.model_utils import local_model_digest, resize_embeddings_for_tokenizer
 
@@ -80,6 +81,7 @@ def merge_adapter(
     base = AutoModelForSeq2SeqLM.from_pretrained(
         model_source, revision=revision, local_files_only=local_files_only
     )
+    restore_m2m100_tied_weights(base, model_source, revision=revision)
     loaded_revision = getattr(base.config, "_commit_hash", None)
     if revision and loaded_revision and loaded_revision != revision:
         raise ValueError("The resolved base model revision differs from the training manifest")

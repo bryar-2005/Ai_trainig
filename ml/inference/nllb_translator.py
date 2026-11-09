@@ -16,6 +16,7 @@ from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 from ml.inference.base import BaseTranslator, TranslationRequest, TranslationResult
 from ml.inference.model_source import resolve_model_source
+from ml.train.checkpoint import restore_m2m100_tied_weights
 from ml.train.dataset import ContextExample, token_ids, tokenize_example
 from ml.train.model_utils import (
     add_context_token,
@@ -203,6 +204,7 @@ class NllbTranslator(BaseTranslator):
             trust_remote_code=False,
             **model_kwargs,
         )
+        restore_m2m100_tied_weights(self.model, load_source, revision=revision)
         actual_revision = getattr(self.model.config, "_commit_hash", None) or cached_revision
         if revision and actual_revision and revision != actual_revision:
             raise ValueError("Loaded base revision does not match the requested model revision")
