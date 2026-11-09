@@ -20,8 +20,9 @@ pytest.importorskip("celery")
 
 from sqlalchemy import select, update  # noqa: E402
 
-from api.db.models import Cue, Job, Project, now  # noqa: E402
+from api.db.models import Cue, Job, JobEvent, Project, now  # noqa: E402
 from api.db.session import create_engine, create_session_factory  # noqa: E402
+from api.routes.jobs import _eta  # noqa: E402
 from api.worker import JobCancelled, Reporter, _claim, _finish_failure  # noqa: E402
 from tests.test_api import Backend  # noqa: E402
 from tests.test_api import api as shared_api  # noqa: E402
@@ -331,6 +332,85 @@ def test_worker_leases_fence_stale_attempts(api: Backend):
             await engine.dispose()
 
     asyncio.run(exercise())
+
+
+def test_long_translation_emits_small_progress_updates_to_sse(api: Backend):
+    api.register()
+    api.admin()
+    model = api.client.post(
+        "/api/models",
+        json={
+            "name": "progress-fixture",
+            "kind": "base",
+            "direction": "en-ckb",
+            "source": "fixture/not-cached",
+        },
+    ).json()["id"]
+    project = api.project(model_id=model)
+    api.upload(project)
+    job_id = api.client.post(f"/api/projects/{project}/translate", json={}).json()["job_id"]
+    total = 1244
+    expected = [f"Translated {count} of {total} sentences" for count in range(4, 44, 4)]
+
+    async def exercise():
+        engine = create_engine(api.settings.database_url)
+        sessions = create_session_factory(engine)
+        try:
+            job_uuid, lease = uuid.UUID(job_id), uuid.uuid4()
+            assert await _claim(job_uuid, lease, sessions, api.settings) == "claimed"
+            reporter = Reporter(job_uuid, lease, sessions, asyncio.get_running_loop())
+            for count, message in zip(range(4, 44, 4), expected, strict=True):
+                percent = round(100 * (4 + count / total) / 12, 2)
+                await reporter.update("translate", percent, message)
+            # Sub-hundredth callbacks are coalesced, but their cumulative
+            # advance still publishes an event when the next bucket is reached.
+            await reporter.update("translate", percent + 0.001, "tiny advance one")
+            await reporter.update("translate", percent + 0.004, "tiny advance two")
+            await reporter.update("translate", percent + 0.006, "hundredth crossed")
+            await reporter.update("translate", percent + 0.006, "unchanged")
+            await reporter.update("translate", 1.0, "out-of-order update")
+            async with sessions() as session:
+                job = await session.get(Job, job_uuid)
+                assert job is not None and job.progress == pytest.approx(percent + 0.006)
+                messages = (
+                    await session.scalars(
+                        select(JobEvent.message)
+                        .where(JobEvent.job_id == job_uuid, JobEvent.stage == "translate")
+                        .order_by(JobEvent.id)
+                    )
+                ).all()
+            # A stage transition must be visible even without a progress jump.
+            await reporter.update("enforce_glossary", 1.0, "Stage changed")
+            # End the test job so the HTTP SSE stream can be consumed to completion.
+            await _finish_failure(job_uuid, lease, sessions, cancelled=True, error="")
+            return messages
+        finally:
+            await engine.dispose()
+
+    assert asyncio.run(exercise()) == [*expected, "hundredth crossed"]
+    stream = api.client.get(f"/api/jobs/{job_id}/stream")
+    assert stream.status_code == 200
+    assert all(message in stream.text for message in expected)
+    assert "hundredth crossed" in stream.text and "Stage changed" in stream.text
+    assert '"eta_seconds": null' in stream.text
+    assert "event: done" in stream.text
+
+
+def test_translation_eta_is_unknown_for_uneven_pipeline_stages():
+    job = Job(
+        kind="translate",
+        status="running",
+        stage="translate",
+        progress=33.36,
+        started_at=now() - timedelta(seconds=60),
+    )
+    assert _eta(job) is None
+    job.kind = "retranslate"
+    assert _eta(job) is None
+    job.kind = "train"
+    assert _eta(job) is not None
+    job.status = "completed"
+    assert _eta(job) is None
 
 
 def test_failed_worker_reports_failure_without_dialogue(api: Backend):

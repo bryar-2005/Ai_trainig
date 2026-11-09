@@ -90,8 +90,13 @@ class Reporter:
             if job.status != "running":
                 raise JobCancelled()
             progress = min(99.0, max(job.progress, float(percent)))
-            changed = stage != job.stage or progress >= job.progress + 1.0
-            job.stage, job.progress, job.updated_at = stage[:80], progress, now()
+            stage = stage[:80]
+            # Persist small cumulative advances too: large translation jobs can
+            # gain far less than 1% per batch, but each batch should be visible
+            # to the SSE monitor. Bucketing bounds event volume when progress
+            # callbacks are more precise than one hundredth of a percent.
+            changed = stage != job.stage or round(progress, 2) > round(job.progress, 2)
+            job.stage, job.progress, job.updated_at = stage, progress, now()
             if changed:
                 db.add(
                     JobEvent(

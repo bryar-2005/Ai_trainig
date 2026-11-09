@@ -194,7 +194,16 @@ async def delete_job(
 
 
 def _eta(job: Job) -> int | None:
-    if not job.started_at or not 0 < job.progress < 100:
+    # Subtitle pipeline percentages give each of twelve stages equal weight,
+    # not equal runtime. Extrapolating from quick parsing before a long CPU
+    # translation can produce a dangerously optimistic estimate. No reliable
+    # end-to-end estimate is available from that percentage alone.
+    if (
+        job.kind in {"translate", "retranslate"}
+        or job.status != "running"
+        or not job.started_at
+        or not 0 < job.progress < 100
+    ):
         return None
     started = (
         job.started_at.replace(tzinfo=UTC) if job.started_at.tzinfo is None else job.started_at
