@@ -37,6 +37,32 @@ npm run dev
 
 Open `http://localhost:3000`, register an account, and create a project from an authorized subtitle file. An administrator must register compatible model assets before running translation. The workspace supports draft editing and export without a model. Set `INTERNAL_API_ORIGIN` on the **Next server**, not in browser code, if the API is not at its default `http://127.0.0.1:8000`.
 
+## Review paired text files
+
+A separate, offline [text-pair staging CLI](docs/text-pair-staging.md) can audit two local English/Sorani line files. Try it without a corpus, model, GPU or job:
+
+```bash
+python -m ml.data.stage_text_pairs --demo --output-dir outputs/text-pair-demo-01
+```
+
+The demo uses three synthetic pairs. The importer checks line counts, records provenance and rights **declarations**, and quarantines bad pairs without shifting alignment. It does not verify rights, dialect or translation quality. Its output is **not trainer-ready**, and the web UI does not import it. No corpus is downloaded. See the linked guide for commercial-use gates, private output handling, and the remaining integration work.
+
+For plain English–Central Kurdish TMX translation memories, a separate [offline TMX staging CLI](docs/tmx-pair-staging.md) also has a synthetic demo:
+
+```bash
+python -m ml.data.stage_tmx_pairs --demo --output-dir outputs/tmx-pair-demo-01
+```
+
+It keeps source-unit language declarations and ordinals for review but does not invent subtitle timings or make the result trainer-ready. No real corpus has been staged with it.
+
+An offline [pair-overlap audit](docs/overlap-audit.md) can compare an existing subtitle dataset's splits with these staged candidates and optional corrected gold references. It has a synthetic demo with intentional matches:
+
+```bash
+python -m ml.data.audit_overlap --demo --output-dir outputs/overlap-demo-01
+```
+
+The demo writes a private report and exits **1** because its synthetic overlap needs review. Exact and near-text signals are incomplete heuristics: no match does not prove independent works, commercial rights, or an uncontaminated test set. The tool neither starts training nor changes the Windows job, and it is not an automatic trainer gate.
+
 ## Local parallel subtitle layout
 
 Place authorized subtitle files in one folder per film. The folder name is its stable film ID; use exactly one `en` file and one `ckb` file per film. The two formats may differ, and supported extensions are `.srt`, `.vtt`, `.ass`, and `.ssa` (case-insensitive). Nested film directories and symlinked film folders/files are not followed.

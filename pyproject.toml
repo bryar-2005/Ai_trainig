@@ -10,6 +10,8 @@ requires-python = ">=3.11,<3.12"
 dependencies = [
     "datasets>=4.8.5,<5",
     "datasketch>=1.10,<2",
+    # Parse local TMX without accepting DTDs, external entities, or entity expansion.
+    "defusedxml>=0.7.1,<1",
     "fasttext-wheel>=0.9.2,<1",
     # fasttext-wheel 0.9.2's predict API is incompatible with NumPy 2.x.
     "numpy>=1.26,<2",
@@ -63,6 +65,9 @@ wandb = ["wandb>=0.19,<1"]
 
 [project.scripts]
 sorani-build-dataset = "ml.data.build_dataset:main"
+sorani-stage-text-pairs = "ml.data.stage_text_pairs:main"
+sorani-stage-tmx-pairs = "ml.data.stage_tmx_pairs:main"
+sorani-audit-overlap = "ml.data.audit_overlap:main"
 sorani-train = "ml.train.train_lora:main"
 sorani-merge-adapter = "ml.train.merge_adapter:main"
 sorani-evaluate = "ml.eval.evaluate:main"
